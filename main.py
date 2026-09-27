@@ -1,8 +1,29 @@
 import os
 import requests
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+# --- Fake web server to satisfy Render Web Service port binding ---
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"V4.2 VIP PAID Bot Running")
+    def log_message(self, *args):
+        return  # silence logs
+
+def run_fake_server():
+    port = int(os.getenv("PORT", "10000"))
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthHandler)
+        server.serve_forever()
+    except:
+        pass
+
+threading.Thread(target=run_fake_server, daemon=True).start()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")  # e.g. -1001234567890
