@@ -35,6 +35,9 @@ threading.Thread(target=keep_alive, daemon=True).start()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEFAULT_CHANNEL_ID = "-1004402762942"
 CHANNEL_ID = os.getenv("CHANNEL_ID", DEFAULT_CHANNEL_ID)
+# Force numeric for reliability - if @username set, use numeric
+if CHANNEL_ID.startswith("@"):
+    CHANNEL_ID = DEFAULT_CHANNEL_ID
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2093810683"))
 CRYPTO_WALLET = "TGQu8k7BYJ8h1seQLBT6K8GFgajS33TYdM"
 CHANNEL_USERNAME = "@GoldVIPSignalsOnyebest"
@@ -221,7 +224,7 @@ def build_battle7_stable():
 
 async def start(update, context):
     SUBSCRIBERS.add(update.effective_chat.id)
-    msg = f"🏆 GOLD VIP BATTLE 7 STABLE LIVE 🏆\n\n💰 VIP: $25 / month\n📢 Channel: {CHANNEL_USERNAME}\n🆔 ID: {CHANNEL_ID}\n💳 Wallet: {CRYPTO_WALLET}\n\nStrategy: S1 TREND + S2 MOMENTUM + S3 SCALPER + S4 REVERSAL + S5 PRICE + S6 DXY + S7 NEWS\nAnti-Flip: 15min cooldown + Stable History\n\nCommands:\n/signal - BATTLE 7 signal now\n/autopilot - Auto every 15 min (3+ agree & 75%+)\n/autostop - Stop autopilot\n/news - S7 NEWS analysis\n/buy - Join VIP $25\n/channeltest - Test channel\n/setchannel - Set channel ID"
+    msg = f"🏆 GOLD VIP BATTLE 7 STABLE LIVE 🏆\n\n💰 VIP: $25 / month\n📢 Channel: {CHANNEL_USERNAME}\n🆔 ID: {CHANNEL_ID}\n💳 Wallet: {CRYPTO_WALLET}\n\nStrategy: S1 TREND + S2 MOMENTUM + S3 SCALPER + S4 REVERSAL + S5 PRICE + S6 DXY + S7 NEWS\nAnti-Flip: 15min cooldown + Stable History\n\nCommands:\n/signal - BATTLE 7 signal now\n/autopilot - Auto every 15 min (3+ agree & 75%+)\n/autostop - Stop autopilot\n/news - S7 NEWS analysis\n/buy - Join VIP $25\n/channeltest - Test channel\n/setchannel - Set channel ID\n/sendvip - Force send signal to VIP now"
     await update.message.reply_text(msg)
 
 async def buy(update, context):
@@ -320,6 +323,7 @@ def main():
     app.add_handler(CommandHandler("autopilot_on", autopilot_on_alias))
     app.add_handler(CommandHandler("autopilot_off", autopilot_off_alias))
     app.add_handler(CommandHandler("news", news))
+    app.add_handler(CommandHandler("sendvip", sendvip))
     app.add_handler(CommandHandler("setchannel", setchannel))
     app.add_handler(CommandHandler("channeltest", channeltest))
     print("BATTLE 7 STABLE started - ALWAYS AWAKE + ANTI-FLIP ON")
