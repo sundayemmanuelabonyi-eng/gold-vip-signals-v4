@@ -1,4 +1,3 @@
-
 import os
 import threading
 import asyncio
@@ -178,7 +177,6 @@ def build_battle7_stable():
     now_ts = time.time()
     if LAST_DIRECTION and direction != "WAIT" and LAST_DIRECTION != direction:
         if now_ts - LAST_SIGNAL_TIME < 900:
-            print(f"Anti-flip: Keeping {LAST_DIRECTION} instead of {direction}")
             direction = LAST_DIRECTION
             if direction == "BUY":
                 agreeing = buy_signals; count = len(buy_signals)
@@ -219,101 +217,57 @@ def build_battle7_stable():
     else:
         lines.append(f"❌ CONFLUENCE: WAIT {conf_pct}% ({count} agree)")
         lines.append("⏸️ No trade - waiting for alignment")
-    return "
-".join(lines), direction, conf_pct, count, price, yield_val, dxy_val, rsi_val
+    return "\n".join(lines), direction, conf_pct, count, price, yield_val, dxy_val, rsi_val
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update, context):
     SUBSCRIBERS.add(update.effective_chat.id)
-    await update.message.reply_text(f"🏆 GOLD VIP BATTLE 7 STABLE LIVE 🏆
+    msg = f"🏆 GOLD VIP BATTLE 7 STABLE LIVE 🏆\n\n💰 VIP: $25 / month\n📢 Channel: {CHANNEL_USERNAME}\n🆔 ID: {CHANNEL_ID}\n💳 Wallet: {CRYPTO_WALLET}\n\nStrategy: S1 TREND + S2 MOMENTUM + S3 SCALPER + S4 REVERSAL + S5 PRICE + S6 DXY + S7 NEWS\nAnti-Flip: 15min cooldown + Stable History\n\nCommands:\n/signal - BATTLE 7 signal now\n/autopilot - Auto every 15 min (3+ agree & 75%+)\n/autostop - Stop autopilot\n/news - S7 NEWS analysis\n/buy - Join VIP $25\n/channeltest - Test channel\n/setchannel - Set channel ID"
+    await update.message.reply_text(msg)
 
-💰 VIP: $25 / month
-📢 Channel: {CHANNEL_USERNAME}
-🆔 ID: {CHANNEL_ID}
-💳 Wallet: {CRYPTO_WALLET}
-
-Strategy: S1 TREND + S2 MOMENTUM + S3 SCALPER + S4 REVERSAL + S5 PRICE + S6 DXY + S7 NEWS
-Anti-Flip: 15min cooldown + Stable History
-
-Commands:
-/signal - BATTLE 7 signal now
-/autopilot - Auto every 15 min (3+ agree & 75%+)
-/autostop - Stop autopilot
-/news - S7 NEWS analysis
-/buy - Join VIP $25
-/channeltest - Test channel
-/setchannel - Set channel ID")
-
-async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def buy(update, context):
     try:
-        text = f"💳 JOIN VIP FOR $25 / MONTH
-
-Pay via USDT TRC20:
-{CRYPTO_WALLET}
-
-After payment, send TXID/receipt to @Onyebest
-ID: 2093810683
-
-✅ Private VIP channel: {CHANNEL_USERNAME}
-✅ BATTLE 7 STABLE Strategy S1-S7
-✅ Anti-Flip Protection (15min)
-✅ 90% Accuracy
-✅ 3-5 Signals Daily"
-        await update.message.reply_text(text)
+        msg = f"💳 JOIN VIP FOR $25 / MONTH\n\nPay via USDT TRC20:\n{CRYPTO_WALLET}\n\nAfter payment, send TXID/receipt to @Onyebest\nID: 2093810683\n\n✅ Private VIP channel: {CHANNEL_USERNAME}\n✅ BATTLE 7 STABLE Strategy S1-S7\n✅ Anti-Flip Protection (15min)\n✅ 90% Accuracy\n✅ 3-5 Signals Daily"
+        await update.message.reply_text(msg)
     except Exception as e:
-        print(f"BUY error: {e}")
         await update.message.reply_text(f"💳 VIP $25 - Wallet: {CRYPTO_WALLET} - Contact @Onyebest")
 
-async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def signal(update, context):
     msg, _, _, _, _, _, _, _ = build_battle7_stable()
     await update.message.reply_text(msg)
 
-async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def news(update, context):
     price, hist, rsi_val, yield_val, dxy_val = get_gold_data_stable()
     if yield_val > 5.30:
         s7_dir, s7_conf = "SELL", 78
-        analysis = f"Yield HIGH {yield_val:.2f}% → Dollar strong → Gold bearish"
+        analysis = f"Yield HIGH {yield_val:.2f}% -> Dollar strong -> Gold bearish"
     elif yield_val < 5.03:
         s7_dir, s7_conf = "BUY", 76
-        analysis = f"Yield LOW {yield_val:.2f}% → Dollar weak → Gold bullish"
+        analysis = f"Yield LOW {yield_val:.2f}% -> Dollar weak -> Gold bullish"
     else:
         s7_dir, s7_conf = "WAIT", 0
-        analysis = f"Yield sideways {yield_val:.2f}% → No clear dollar impact"
-    await update.message.reply_text(f"📰 S7 NEWS ANALYSIS
-💰 Gold ${price:.2f}
-US10Y {yield_val:.2f}%
-DXY {dxy_val:.2f}
-RSI {rsi_val:.1f}
+        analysis = f"Yield sideways {yield_val:.2f}% -> No clear dollar impact"
+    await update.message.reply_text(f"📰 S7 NEWS ANALYSIS\n💰 Gold ${price:.2f}\nUS10Y {yield_val:.2f}%\nDXY {dxy_val:.2f}\nRSI {rsi_val:.1f}\n\nS7 NEWS: {s7_dir} {s7_conf}%\n{analysis}\n\nRule: Yield ↑ = Dollar ↑ = Gold ↓")
 
-S7 NEWS: {s7_dir} {s7_conf}%
-{analysis}
-
-Rule: Yield ↑ = Dollar ↑ = Gold ↓")
-
-async def autopilot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def autopilot_cmd(update, context):
     global AUTOPILOT_ACTIVE
     AUTOPILOT_ACTIVE = True
     SUBSCRIBERS.add(update.effective_chat.id)
-    await update.message.reply_text(f"✅ AUTOPILOT ON
-I will check every 15 min
-Alert only if 3+ agree & 75%+
-Anti-flip protection ON
-Your chat ID {update.effective_chat.id} saved.
-Use /autostop to stop")
+    await update.message.reply_text(f"✅ AUTOPILOT ON\nI will check every 15 min\nAlert only if 3+ agree & 75%+\nAnti-flip protection ON\nYour chat ID {update.effective_chat.id} saved.\nUse /autostop to stop")
     asyncio.create_task(autopilot_loop(context))
 
-async def autostop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def autostop(update, context):
     global AUTOPILOT_ACTIVE
     AUTOPILOT_ACTIVE = False
     SUBSCRIBERS.discard(update.effective_chat.id)
     await update.message.reply_text("🛑 AUTOPILOT OFF - Stopped checking")
 
-async def autopilot_on_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def autopilot_on_alias(update, context):
     await autopilot_cmd(update, context)
 
-async def autopilot_off_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def autopilot_off_alias(update, context):
     await autostop(update, context)
 
-async def autopilot_loop(context: ContextTypes.DEFAULT_TYPE):
+async def autopilot_loop(context):
     global AUTOPILOT_ACTIVE
     while AUTOPILOT_ACTIVE:
         await asyncio.sleep(15*60)
@@ -324,8 +278,7 @@ async def autopilot_loop(context: ContextTypes.DEFAULT_TYPE):
             if count>=3 and conf_pct>=75 and direction!="WAIT":
                 for chat_id in list(SUBSCRIBERS):
                     try:
-                        await context.bot.send_message(chat_id=chat_id, text=f"🤖 AUTOPILOT ALERT
-{msg}")
+                        await context.bot.send_message(chat_id=chat_id, text=f"🤖 AUTOPILOT ALERT\n{msg}")
                     except: pass
                 try:
                     await context.bot.send_message(chat_id=CHANNEL_ID, text=msg)
@@ -333,7 +286,7 @@ async def autopilot_loop(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"Autopilot error: {e}")
 
-async def setchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def setchannel(update, context):
     global CHANNEL_ID
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Admin only")
@@ -342,10 +295,9 @@ async def setchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         CHANNEL_ID = context.args[0]
         await update.message.reply_text(f"✅ Channel set to: {CHANNEL_ID}")
     else:
-        await update.message.reply_text(f"Current Channel: {CHANNEL_ID}
-Usage: /setchannel -100xxxx")
+        await update.message.reply_text(f"Current Channel: {CHANNEL_ID}\nUsage: /setchannel -100xxxx")
 
-async def channeltest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def channeltest(update, context):
     if not CHANNEL_ID:
         await update.message.reply_text("❌ CHANNEL_ID not set. Use /setchannel -100xxxx")
         return
@@ -353,8 +305,7 @@ async def channeltest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=CHANNEL_ID, text="✅ VIP Bot Channel Test - BATTLE 7 STABLE Connected!")
         await update.message.reply_text("✅ Test sent to channel!")
     except Exception as e:
-        await update.message.reply_text(f"❌ Failed: {e}
-Fix: Add bot as Admin + /setchannel -100xxxx")
+        await update.message.reply_text(f"❌ Failed: {e}\nFix: Add bot as Admin + /setchannel -100xxxx")
 
 def main():
     if not BOT_TOKEN:
