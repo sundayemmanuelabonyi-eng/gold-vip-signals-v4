@@ -21,6 +21,26 @@ def run_server():
     except: pass
 threading.Thread(target=run_server, daemon=True).start()
 
+# --- ALWAYS-AWAKE TRICK (like your Onyebest Forex Signals bot) ---
+def keep_alive():
+    import time
+    while True:
+        try:
+            # Self-ping every 4 min to prevent Render sleep
+            # Render sets RENDER_EXTERNAL_URL automatically
+            url = os.getenv("RENDER_EXTERNAL_URL")
+            if url:
+                requests.get(url, timeout=5)
+                print(f"Keep-alive ping {url}")
+            else:
+                # Fallback: ping localhost health server
+                requests.get(f"http://localhost:{os.getenv('PORT','10000')}", timeout=5)
+        except Exception as e:
+            print(f"Keep-alive error: {e}")
+        time.sleep(240)  # 4 minutes
+
+threading.Thread(target=keep_alive, daemon=True).start()
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEFAULT_CHANNEL_ID = "-1004402762942"
 CHANNEL_ID = os.getenv("CHANNEL_ID", DEFAULT_CHANNEL_ID)
@@ -208,9 +228,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"💳 JOIN VIP FOR $25 / MONTH\n\nPay via USDT TRC20:\n{CRYPTO_WALLET}\n\nAfter payment, send TXID/receipt to @Onyebest\nID: 2093810683\n\n✅ Private VIP channel: {CHANNEL_USERNAME}\n✅ BATTLE 7 Strategy S1-S7\n✅ 90% Accuracy\n✅ 3-5 Signals Daily"
-    )
+    try:
+        text = (
+            f"💳 JOIN VIP FOR $25 / MONTH\n\n"
+            f"Pay via USDT TRC20:\n{CRYPTO_WALLET}\n\n"
+            f"After payment, send TXID/receipt to @Onyebest\n"
+            f"ID: 2093810683\n\n"
+            f"✅ Private VIP channel: {CHANNEL_USERNAME}\n"
+            f"✅ BATTLE 7 Strategy S1-S7\n"
+            f"✅ 90% Accuracy\n"
+            f"✅ 3-5 Signals Daily\n"
+            f"✅ S1 TREND + S2 MOMENTUM + S3 SCALPER\n"
+            f"✅ S4 REVERSAL + S5 PRICE + S6 DXY + S7 NEWS"
+        )
+        await update.message.reply_text(text)
+        print(f"BUY command served to {update.effective_chat.id}")
+    except Exception as e:
+        print(f"BUY error: {e}")
+        await update.message.reply_text(f"💳 VIP $25 - Wallet: {CRYPTO_WALLET} - Contact @Onyebest")
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg, _, _, _, _, _, _, _ = build_battle7()
@@ -307,8 +342,9 @@ def main():
     app.add_handler(CommandHandler("news", news))
     app.add_handler(CommandHandler("setchannel", setchannel))
     app.add_handler(CommandHandler("channeltest", channeltest))
-    print("BATTLE 7 started")
-    app.run_polling()
+    print("BATTLE 7 started - ALWAYS AWAKE MODE ON")
+    # drop_pending_updates=True prevents old /buy /signal queuing up and sleeping
+    app.run_polling(drop_pending_updates=True, allowed_updates=["message"])
 
 if __name__ == "__main__":
     main()
