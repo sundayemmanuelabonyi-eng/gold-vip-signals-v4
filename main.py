@@ -1,8 +1,29 @@
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import requests
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+# --- 3 lines to keep Web Service alive (light & fast) ---
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, *a):
+        return
+
+def run_server():
+    try:
+        port = int(os.getenv("PORT", "10000"))
+        HTTPServer(("0.0.0.0", port), H).serve_forever()
+    except:
+        pass
+
+threading.Thread(target=run_server, daemon=True).start()
+# --- end ---
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
@@ -20,30 +41,11 @@ def get_gold_price():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SUBSCRIBERS.add(update.effective_chat.id)
     await update.message.reply_text(
-        "🔥 GOLD VIP V4.2 LIVE 🔥\n\n"
-        "Welcome to Premium Gold Signals!\n"
-        "💰 VIP: $25 / month\n\n"
-        "Commands:\n"
-        "/buy - Join VIP ($25)\n"
-        "/signal - Get instant signal\n"
-        "/autopilot_on - Start auto signals\n"
-        "/autopilot_off - Stop auto signals\n"
-        "/channeltest - Test channel"
+        "🔥 GOLD VIP V4.2 LIVE 🔥\n\nWelcome to Premium Gold Signals!\n💰 VIP: $25 / month\n\nCommands:\n/buy - Join VIP ($25)\n/signal - Get instant signal\n/autopilot_on - Start auto signals\n/autopilot_off - Stop auto signals\n/channeltest - Test channel"
     )
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "💳 JOIN VIP FOR $25 / MONTH\n\n"
-        "Pay via:\n"
-        "• OPay: 806 123 4567 - Sunday E.\n"
-        "• USDT TRC20: TX... (replace)\n\n"
-        "After payment, send screenshot to admin\n"
-        "You will be added to private VIP channel!\n\n"
-        "VIP Benefits:\n"
-        "✅ 3-5 Gold Signals Daily\n"
-        "✅ 90% Accuracy\n"
-        "✅ SL & TP Included"
-    )
+    await update.message.reply_text("💳 JOIN VIP FOR $25 / MONTH\n\nPay via:\n• OPay: 806 123 4567 - Sunday E.\n• USDT TRC20: TX... (replace)\n\nAfter payment, send screenshot to admin\nYou will be added to private VIP channel!\n\nVIP Benefits:\n✅ 3-5 Gold Signals Daily\n✅ 90% Accuracy\n✅ SL & TP Included")
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price = get_gold_price()
