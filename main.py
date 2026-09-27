@@ -289,6 +289,17 @@ async def autopilot_loop(context):
         except Exception as e:
             print(f"Autopilot error: {e}")
 
+async def sendvip(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Admin only")
+        return
+    msg, direction, conf_pct, count, price, yv, dxy, rsi_v = build_battle7_stable()
+    try:
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=msg)
+        await update.message.reply_text(f"✅ Sent to VIP channel {CHANNEL_ID}: {direction} {conf_pct}% ({count} agree)")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to send to {CHANNEL_ID}: {e} Try: /setchannel -1004402762942 then /channeltest")
+
 async def setchannel(update, context):
     global CHANNEL_ID
     if update.effective_user.id != ADMIN_ID:
