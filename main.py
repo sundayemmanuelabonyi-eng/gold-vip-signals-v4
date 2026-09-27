@@ -220,7 +220,37 @@ def build_battle7_stable():
     else:
         lines.append(f"❌ CONFLUENCE: WAIT {conf_pct}% ({count} agree)")
         lines.append("⏸️ No trade - waiting for alignment")
-    return "\n".join(lines), direction, conf_pct, count, price, yield_val, dxy_val, rsi_val
+
+    # --- VIP SHORT MESSAGE (only this goes to VIP channel) ---
+    vip_lines = []
+    if direction != "WAIT":
+        vip_lines.append(f"🔥 CONFLUENCE: {direction} {conf_pct}% ({count} agree)")
+        if count>=3 and conf_pct>=75:
+            vip_lines.append("✅ HIGH CONFIDENCE")
+        else:
+            vip_lines.append("⚠️ MEDIUM CONFIDENCE")
+        vip_lines.append("")
+        if direction=="BUY":
+            vip_lines.append(f"{emoji} GOLD BUY NOW")
+            vip_lines.append(f"Entry: {price:.2f}")
+            vip_lines.append(f"SL: {price-8:.2f}")
+            vip_lines.append(f"TP1: {price+6:.2f}")
+            vip_lines.append(f"TP2: {price+12:.2f}")
+            vip_lines.append(f"⏰ {now} | DXY {dxy_val:.2f} | EMA9 {e9:.2f} > EMA21 {e21:.2f}")
+        else:
+            vip_lines.append(f"{emoji} GOLD SELL NOW")
+            vip_lines.append(f"Entry: {price:.2f}")
+            vip_lines.append(f"SL: {price+8:.2f}")
+            vip_lines.append(f"TP1: {price-6:.2f}")
+            vip_lines.append(f"TP2: {price-12:.2f}")
+            vip_lines.append(f"⏰ {now} | DXY {dxy_val:.2f} | EMA9 {e9:.2f} < EMA21 {e21:.2f}")
+    else:
+        vip_lines.append(f"❌ CONFLUENCE: WAIT {conf_pct}% ({count} agree)")
+        vip_lines.append("⏸️ No trade - waiting for alignment")
+    
+    vip_msg = "\n".join(vip_lines)
+    full_msg = "\n".join(lines)
+    return full_msg, vip_msg, direction, conf_pct, count, price, yield_val, dxy_val, rsi_val
 
 async def start(update, context):
     SUBSCRIBERS.add(update.effective_chat.id)
@@ -235,8 +265,8 @@ async def buy(update, context):
         await update.message.reply_text(f"💳 VIP $25 - Wallet: {CRYPTO_WALLET} - Contact @Onyebest")
 
 async def signal(update, context):
-    msg, _, _, _, _, _, _, _ = build_battle7_stable()
-    await update.message.reply_text(msg)
+    full_msg, vip_msg, _, _, _, _, _, _, _ = build_battle7_stable()
+    await update.message.reply_text(full_msg)
 
 async def news(update, context):
     price, hist, rsi_val, yield_val, dxy_val = get_gold_data_stable()
@@ -277,14 +307,14 @@ async def autopilot_loop(context):
         if not AUTOPILOT_ACTIVE:
             break
         try:
-            msg, direction, conf_pct, count, price, yv, dxy, rsi_v = build_battle7_stable()
+            full_msg, vip_msg, direction, conf_pct, count, price, yv, dxy, rsi_v = build_battle7_stable()
             if count>=3 and conf_pct>=75 and direction!="WAIT":
                 for chat_id in list(SUBSCRIBERS):
                     try:
-                        await context.bot.send_message(chat_id=chat_id, text=f"🤖 AUTOPILOT ALERT\n{msg}")
+                        await context.bot.send_message(chat_id=chat_id, text=f"🤖 AUTOPILOT ALERT\n{full_msg}")
                     except: pass
                 try:
-                    await context.bot.send_message(chat_id=CHANNEL_ID, text=msg)
+                    await context.bot.send_message(chat_id=CHANNEL_ID, text=vip_msg)
                 except: pass
         except Exception as e:
             print(f"Autopilot error: {e}")
@@ -293,10 +323,10 @@ async def sendvip(update, context):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Admin only")
         return
-    msg, direction, conf_pct, count, price, yv, dxy, rsi_v = build_battle7_stable()
+    full_msg, vip_msg, direction, conf_pct, count, price, yv, dxy, rsi_v = build_battle7_stable()
     try:
-        await context.bot.send_message(chat_id=CHANNEL_ID, text=msg)
-        await update.message.reply_text(f"✅ Sent to VIP channel {CHANNEL_ID}: {direction} {conf_pct}% ({count} agree)")
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=vip_msg)
+        await update.message.reply_text(f"✅ Sent to VIP channel {CHANNEL_ID}:\n{vip_msg}")
     except Exception as e:
         await update.message.reply_text(f"❌ Failed to send to {CHANNEL_ID}: {e} Try: /setchannel -1004402762942 then /channeltest")
 
