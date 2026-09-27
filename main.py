@@ -21,8 +21,12 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
+# FINAL DEPLOY - Hardcoded from your verified info
+DEFAULT_CHANNEL_ID = "-1004402762942"
+CHANNEL_ID = os.getenv("CHANNEL_ID", DEFAULT_CHANNEL_ID)
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2093810683"))
+CRYPTO_WALLET = "TGQu8k7BYJ8h1seQLBT6K8GFgajS33TYdM"
+CHANNEL_USERNAME = "@GoldVIPSignalsOnyebest"
 
 SUBSCRIBERS = set()
 
@@ -110,10 +114,10 @@ def build_signal():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SUBSCRIBERS.add(update.effective_chat.id)
-    await update.message.reply_text("🧪 GOLD VIP V6 FINAL ALL-IN-ONE LIVE 🧪\n\n💰 VIP: $25 / month\n\nStrategy: RSI + EMA + Yield + Confluence S1-S6\n\nCommands:\n/buy - Join VIP ($25)\n/signal - ALL-IN-ONE BUY/SELL now\n/autopilot_on - Start auto\n/autopilot_off - Stop\n/channeltest - Test channel\n/setchannel - Set channel ID")
+    await update.message.reply_text(f"🧪 GOLD VIP V6 FINAL ALL-IN-ONE LIVE 🧪\n\n💰 VIP: $25 / month\n📢 Channel: {CHANNEL_USERNAME}\n🆔 ID: {CHANNEL_ID}\n💳 Wallet: {CRYPTO_WALLET[:8]}...{CRYPTO_WALLET[-6:]}\n\nStrategy: RSI + EMA + Yield + Confluence S1-S6\n\nCommands:\n/buy - Join VIP ($25)\n/signal - ALL-IN-ONE BUY/SELL now\n/autopilot_on - Start auto\n/autopilot_off - Stop\n/channeltest - Test channel\n/setchannel - Set channel ID")
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("💳 JOIN VIP FOR $25 / MONTH\n\nPay via:\n• OPay: 806 123 4567 - Sunday E.\n• USDT TRC20: TX...\n\nAfter payment, send receipt to @Onyebest\nID: 2093810683\n\n✅ Private VIP channel\n✅ V4 ALL-IN-ONE Strategy\n✅ 90% Accuracy")
+    await update.message.reply_text("💳 JOIN VIP FOR $25 / MONTH\n\nPay via USDT TRC20:\nTGQu8k7BYJ8h1seQLBT6K8GFgajS33TYdM\n\nAfter payment, send TXID/receipt to @Onyebest\nID: 2093810683\n\n✅ Private VIP channel\n✅ V4 ALL-IN-ONE Strategy S1-S6\n✅ 90% Accuracy\n✅ 3-5 Signals Daily")
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = build_signal()
