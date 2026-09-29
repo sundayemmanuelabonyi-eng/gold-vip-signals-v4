@@ -33,16 +33,14 @@ TWELVE_API_KEY = os.getenv("TWELVE_API_KEY", "")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
 
-WAT = pytz.timezone("Africa/Lagos")  # UTC+1 Nigeria
-MT5_GMT3 = pytz.timezone("Etc/GMT-3")  # MT5 broker GMT+3
+WAT = pytz.timezone("Africa/Lagos")
+MT5_GMT3 = pytz.timezone("Etc/GMT-3")
 MT5_GMT2 = pytz.timezone("Etc/GMT-2")
 
-# Your thresholds
-RETEST_THRESHOLD = 15.0  # $15 retest for OB
+RETEST_THRESHOLD = 15.0
 WICK_RATIO = 0.5
 
 def is_weekend_closed(dt_utc: datetime) -> bool:
-    """Gold closed Saturday=5, Sunday=6"""
     return dt_utc.weekday() >= 5
 
 def get_time_strings(utc_dt: datetime):
@@ -56,7 +54,6 @@ def get_time_strings(utc_dt: datetime):
         "UTC": utc_dt.strftime("%Y-%m-%d %H:%M UTC"),
     }
 
-# --- Indicators ---
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
@@ -68,7 +65,6 @@ def rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def find_structure(df):
-    """Find HL that created HH and LH that created LL - YOUR LOGIC H->HL->HH"""
     highs = df['high'].values
     lows = df['low'].values
     bullish_obs = []
@@ -80,11 +76,8 @@ def find_structure(df):
         if lows[i] == min(lows[i-10:i+1]) and lows[i] < min(lows[i-20:i-10]):
             lh_idx = np.argmax(highs[i-20:i]) + (i-20)
             bearish_obs.append({"LH": highs[lh_idx], "LL": lows[i]})
-    last_bull = bullish_obs[-1] if bullish_obs else None
-    last_bear = bearish_obs[-1] if bearish_obs else None
-    return last_bull, last_bear
+    return (bullish_obs[-1] if bullish_obs else None), (bearish_obs[-1] if bearish_obs else None)
 
-# --- Data fetch ---
 async def fetch_candles(symbol="XAU/USD", interval="1h", outputsize=200):
     if not TWELVE_API_KEY:
         return None
@@ -109,10 +102,7 @@ async def fetch_dxy():
     except:
         return None
 
-# --- 4 CORE STRATEGIES ---
-
 def S1_TREND(df_4h):
-    """S1 TREND: 4H EMA + Structure"""
     if df_4h is None or len(df_4h) < 30:
         return {"signal": "WAIT", "pct": 0, "detail": "No 4H data", "ema9": 4254.37, "ema21": 4266.02}
     df_4h["EMA9"] = ema(df_4h["close"], 9)
@@ -121,16 +111,15 @@ def S1_TREND(df_4h):
     ema_dist = abs(last["EMA9"] - last["EMA21"]) / last["close"] * 100
     if last["EMA9"] > last["EMA21"] and last["close"] > last["EMA21"]:
         pct = round(min(90, 65 + ema_dist * 400))
-        return {"signal": "BUY", "pct": pct, "detail": f"EMA9 {last['EMA9']:.2f} > EMA21 {last['EMA21']:.2f} Bull Trend", "ema9": last["EMA9"], "ema21": last["EMA21"]}
+        return {"signal": "BUY", "pct": pct, "detail": f"EMA9 {last['EMA9']:.2f} > EMA21 {last['EMA21']:.2f} Bull", "ema9": last["EMA9"], "ema21": last["EMA21"]}
     elif last["EMA9"] < last["EMA21"] and last["close"] < last["EMA21"]:
         pct = round(min(90, 65 + ema_dist * 400))
-        return {"signal": "SELL", "pct": pct, "detail": f"EMA9 {last['EMA9']:.2f} < EMA21 {last['EMA21']:.2f} Bear Trend", "ema9": last["EMA9"], "ema21": last["EMA21"]}
+        return {"signal": "SELL", "pct": pct, "detail": f"EMA9 {last['EMA9']:.2f} < EMA21 {last['EMA21']:.2f} Bear", "ema9": last["EMA9"], "ema21": last["EMA21"]}
     return {"signal": "WAIT", "pct": 50, "detail": f"EMA9 {last['EMA9']:.2f} ~ EMA21 {last['EMA21']:.2f}", "ema9": last["EMA9"], "ema21": last["EMA21"]}
 
 def S2_MOMENTUM(df_1h):
-    """S2 MOMENTUM: RSI 14 + RSI 7 Y%"""
     if df_1h is None or len(df_1h) < 30:
-        return {"signal": "WAIT", "pct": 0, "detail": "No 1H data", "rsi14": 50, "rsi7": 7.0, "y": 5.16}
+        return {"signal": "WAIT", "pct": 0, "detail": "No 1H", "rsi14": 50, "rsi7": 7.0, "y": 5.16}
     df_1h["RSI14"] = rsi(df_1h["close"], 14)
     df_1h["RSI7"] = rsi(df_1h["close"], 7)
     last = df_1h.iloc[-1]
@@ -138,10 +127,10 @@ def S2_MOMENTUM(df_1h):
     rsi14, rsi7 = last["RSI14"], last["RSI7"]
     if rsi14 > 62 and rsi7 > 58:
         pct = 98 if rsi14 > 70 else 85
-        return {"signal": "BUY", "pct": pct, "detail": f"RSI14 {rsi14:.1f} RSI7 {rsi7:.1f} Y {y_change:.2f}% Strong Bull", "rsi14": rsi14, "rsi7": rsi7, "y": y_change}
+        return {"signal": "BUY", "pct": pct, "detail": f"RSI14 {rsi14:.1f} RSI7 {rsi7:.1f} Y {y_change:.2f}% Bull", "rsi14": rsi14, "rsi7": rsi7, "y": y_change}
     if rsi14 < 38 and rsi7 < 42:
         pct = 98 if rsi14 < 30 else 85
-        return {"signal": "SELL", "pct": pct, "detail": f"RSI14 {rsi14:.1f} RSI7 {rsi7:.1f} Y {y_change:.2f}% Strong Bear", "rsi14": rsi14, "rsi7": rsi7, "y": y_change}
+        return {"signal": "SELL", "pct": pct, "detail": f"RSI14 {rsi14:.1f} RSI7 {rsi7:.1f} Y {y_change:.2f}% Bear", "rsi14": rsi14, "rsi7": rsi7, "y": y_change}
     if rsi14 > 52:
         return {"signal": "BUY", "pct": 65, "detail": f"RSI14 {rsi14:.1f} Bull bias", "rsi14": rsi14, "rsi7": rsi7, "y": y_change}
     if rsi14 < 48:
@@ -149,13 +138,11 @@ def S2_MOMENTUM(df_1h):
     return {"signal": "WAIT", "pct": 50, "detail": f"RSI14 {rsi14:.1f} Neutral", "rsi14": rsi14, "rsi7": rsi7, "y": y_change}
 
 def S4_REVERSAL(df_4h, df_1h):
-    """S4 REVERSAL: YOUR OB - HL that created HH / LH that created LL + Retest $15 + Rejection Wick + Reversal"""
     if df_4h is None or df_1h is None:
         return {"signal": "WAIT", "pct": 0, "detail": "No data"}
     last_bull, last_bear = find_structure(df_4h)
     last_1h = df_1h.iloc[-1]
     prev_1h = df_1h.iloc[-2]
-    
     if last_bull:
         hl = last_bull["HL"]
         if abs(last_1h["low"] - hl) <= RETEST_THRESHOLD:
@@ -163,7 +150,7 @@ def S4_REVERSAL(df_4h, df_1h):
             lower_wick = min(last_1h["open"], last_1h["close"]) - last_1h["low"]
             if body > 0 and lower_wick > WICK_RATIO * body and last_1h["close"] > hl:
                 if last_1h["close"] > last_1h["open"] and last_1h["close"] > prev_1h["close"]:
-                    return {"signal": "BUY", "pct": 90, "detail": f"Bull OB HL {hl:.2f} Retest {abs(last_1h['low']-hl):.1f} + Reject Wick + Bull Reversal", "ob": hl}
+                    return {"signal": "BUY", "pct": 90, "detail": f"Bull OB HL {hl:.2f} Retest {abs(last_1h['low']-hl):.1f} + Reject + Reversal", "ob": hl}
     if last_bear:
         lh = last_bear["LH"]
         if abs(last_1h["high"] - lh) <= RETEST_THRESHOLD:
@@ -171,25 +158,23 @@ def S4_REVERSAL(df_4h, df_1h):
             upper_wick = last_1h["high"] - max(last_1h["open"], last_1h["close"])
             if body > 0 and upper_wick > WICK_RATIO * body and last_1h["close"] < lh:
                 if last_1h["close"] < last_1h["open"] and last_1h["close"] < prev_1h["close"]:
-                    return {"signal": "SELL", "pct": 90, "detail": f"Bear OB LH {lh:.2f} Retest {abs(last_1h['high']-lh):.1f} + Reject Wick + Bear Reversal", "ob": lh}
+                    return {"signal": "SELL", "pct": 90, "detail": f"Bear OB LH {lh:.2f} Retest {abs(last_1h['high']-lh):.1f} + Reject + Reversal", "ob": lh}
     return {"signal": "WAIT", "pct": 50, "detail": f"No OB retest within ${RETEST_THRESHOLD}"}
 
 def S6_DXY(df_dxy):
-    """S6 DXY: Inverse correlation"""
     if df_dxy is None or len(df_dxy) < 20:
-        return {"signal": "SELL", "pct": 62, "detail": "DXY 103.00 SELL => Gold BUY bias (mock)", "dxy": 103.0}
+        return {"signal": "SELL", "pct": 62, "detail": "DXY 103.00 SELL => Gold BUY bias", "dxy": 103.0}
     df_dxy["EMA21"] = ema(df_dxy["close"], 21)
     last = df_dxy.iloc[-1]
     if last["close"] > last["EMA21"]:
-        return {"signal": "SELL", "pct": 70, "detail": f"DXY {last['close']:.2f} Bull => Gold Bear SELL", "dxy": last["close"]}
+        return {"signal": "SELL", "pct": 70, "detail": f"DXY {last['close']:.2f} Bull => Gold Bear", "dxy": last["close"]}
     else:
-        return {"signal": "BUY", "pct": 70, "detail": f"DXY {last['close']:.2f} Bear => Gold Bull BUY", "dxy": last["close"]}
+        return {"signal": "BUY", "pct": 70, "detail": f"DXY {last['close']:.2f} Bear => Gold Bull", "dxy": last["close"]}
 
 def calculate_confluence(strategies):
     buy_votes = [v["pct"] for v in strategies.values() if v["signal"] == "BUY"]
     sell_votes = [v["pct"] for v in strategies.values() if v["signal"] == "SELL"]
     has_S4 = strategies["S4_REVERSAL"]["signal"] != "WAIT"
-    
     if len(buy_votes) >= len(sell_votes) and len(buy_votes) >= 2:
         avg = sum(buy_votes) / len(buy_votes)
         if has_S4 and strategies["S4_REVERSAL"]["signal"] == "BUY":
@@ -252,7 +237,6 @@ async def get_full_signal():
         }
         confluence = {"signal": "WAIT", "pct": 0, "agree": 0, "confidence": "MARKET CLOSED", "buy": 0, "sell": 0, "has_S4": False}
         return build_alert(strategies, confluence, price, time_info)
-    
     df_4h, df_1h, df_dxy = None, None, None
     try:
         df_4h = await fetch_candles("XAU/USD", "4h", 200)
@@ -260,7 +244,6 @@ async def get_full_signal():
         df_dxy = await fetch_dxy()
     except Exception as e:
         print(f"Fetch error: {e}")
-    
     if df_1h is None:
         price = 4236.40
         strategies = {
@@ -276,11 +259,9 @@ async def get_full_signal():
         strategies["S2_MOMENTUM"] = S2_MOMENTUM(df_1h)
         strategies["S4_REVERSAL"] = S4_REVERSAL(df_4h, df_1h)
         strategies["S6_DXY"] = S6_DXY(df_dxy)
-    
     confluence = calculate_confluence(strategies)
     return build_alert(strategies, confluence, price, time_info)
 
-# Telegram Bot
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
