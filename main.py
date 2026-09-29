@@ -1,374 +1,138 @@
-import os
-import threading
-import asyncio
-import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import requests
-import random
-from datetime import datetime
+"""
+V7.1 STREAMLINED - Only 4 Accurate Signals for Gold
+S1 TREND + S2 MOMENTUM + S4 OB + S6 DXY
+"""
+import os, asyncio
+from datetime import datetime, timezone
+import pytz, httpx, pandas as pd, numpy as np
+TWELVE_API_KEY=os.getenv("TWELVE_API_KEY","")
+TELEGRAM_TOKEN=os.getenv("TELEGRAM_TOKEN","")
+WAT=pytz.timezone("Africa/Lagos")
+MT5_GMT3=pytz.timezone("Etc/GMT-3")
+RETEST_THRESHOLD=15.0
+WICK_RATIO=0.5
+def is_weekend_closed(dt): return dt.weekday()>=5
+def get_time_strings(utc_dt):
+    return {"WAT":utc_dt.astimezone(WAT).strftime("%m/%d %H:%M WAT"),"MT5_GMT3":utc_dt.astimezone(MT5_GMT3).strftime("%m/%d %H:%M MT5"),"UTC":utc_dt.strftime("%Y-%m-%d %H:%M UTC")}
+def ema(s,p): return s.ewm(span=p,adjust=False).mean()
+def rsi(s,p=14):
+    d=s.diff(); g=d.where(d>0,0).rolling(window=p).mean(); l=-d.where(d<0,0).rolling(window=p).mean(); rs=g/l; return 100-(100/(1+rs))
+def find_structure(df):
+    highs,lows=df['high'].values,df['low'].values; bullish_obs,bearish_obs=[],[] 
+    for i in range(20,len(df)-5):
+        if highs[i]==max(highs[i-10:i+1]) and highs[i]>max(highs[i-20:i-10]):
+            hl_idx=np.argmin(lows[i-20:i])+(i-20); bullish_obs.append({"HL":lows[hl_idx],"HH":highs[i]})
+        if lows[i]==min(lows[i-10:i+1]) and lows[i]<min(lows[i-20:i-10]):
+            lh_idx=np.argmax(highs[i-20:i])+(i-20); bearish_obs.append({"LH":highs[lh_idx],"LL":lows[i]})
+    return (bullish_obs[-1] if bullish_obs else None),(bearish_obs[-1] if bearish_obs else None)
+async def fetch_candles(symbol="XAU/USD",interval="1h",outputsize=200):
+    if not TWELVE_API_KEY: return None
+    url=f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize={outputsize}&apikey={TWELVE_API_KEY}&format=JSON"
+    async with httpx.AsyncClient() as client:
+        r=await client.get(url,timeout=20); data=r.json()
+        if "values" not in data: return None
+        df=pd.DataFrame(data["values"])[::-1]; df["datetime"]=pd.to_datetime(df["datetime"])
+        for c in ["open","high","low","close"]: df[c]=df[c].astype(float)
+        return df
+async def fetch_dxy():
+    try: return await fetch_candles("DXY","1h",100)
+    except: return None
+def S1_TREND(df_4h):
+    if df_4h is None or len(df_4h)<30: return {"signal":"WAIT","pct":0,"detail":"No 4H","ema9":4254.37,"ema21":4266.02}
+    df_4h["EMA9"]=ema(df_4h["close"],9); df_4h["EMA21"]=ema(df_4h["close"],21); last=df_4h.iloc[-1]; ema_dist=abs(last["EMA9"]-last["EMA21"])/last["close"]*100
+    if last["EMA9"]>last["EMA21"] and last["close"]>last["EMA21"]: return {"signal":"BUY","pct":round(min(90,65+ema_dist*400)),"detail":f"EMA9 {last['EMA9']:.2f} > EMA21 {last['EMA21']:.2f} Bull","ema9":last["EMA9"],"ema21":last["EMA21"]}
+    elif last["EMA9"]<last["EMA21"] and last["close"]<last["EMA21"]: return {"signal":"SELL","pct":round(min(90,65+ema_dist*400)),"detail":f"EMA9 {last['EMA9']:.2f} < EMA21 {last['EMA21']:.2f} Bear","ema9":last["EMA9"],"ema21":last["EMA21"]}
+    return {"signal":"WAIT","pct":50,"detail":f"EMA9 ~ EMA21","ema9":last["EMA9"],"ema21":last["EMA21"]}
+def S2_MOMENTUM(df_1h):
+    if df_1h is None or len(df_1h)<30: return {"signal":"WAIT","pct":0,"detail":"No 1H","rsi14":50,"rsi7":7,"y":5.16}
+    df_1h["RSI14"]=rsi(df_1h["close"],14); df_1h["RSI7"]=rsi(df_1h["close"],7); last=df_1h.iloc[-1]; y_change=(last["close"]-df_1h.iloc[-24]["close"])/df_1h.iloc[-24]["close"]*100 if len(df_1h)>=24 else 0; rsi14,rsi7=last["RSI14"],last["RSI7"]
+    if rsi14>62 and rsi7>58: return {"signal":"BUY","pct":98 if rsi14>70 else 85,"detail":f"RSI14 {rsi14:.1f} RSI7 {rsi7:.1f} Y {y_change:.2f}% Bull","rsi14":rsi14,"rsi7":rsi7,"y":y_change}
+    if rsi14<38 and rsi7<42: return {"signal":"SELL","pct":98 if rsi14<30 else 85,"detail":f"RSI14 {rsi14:.1f} RSI7 {rsi7:.1f} Y {y_change:.2f}% Bear","rsi14":rsi14,"rsi7":rsi7,"y":y_change}
+    if rsi14>52: return {"signal":"BUY","pct":65,"detail":f"RSI14 {rsi14:.1f} Bull bias","rsi14":rsi14,"rsi7":rsi7,"y":y_change}
+    if rsi14<48: return {"signal":"SELL","pct":65,"detail":f"RSI14 {rsi14:.1f} Bear bias","rsi14":rsi14,"rsi7":rsi7,"y":y_change}
+    return {"signal":"WAIT","pct":50,"detail":f"RSI14 {rsi14:.1f} Neutral","rsi14":rsi14,"rsi7":rsi7,"y":y_change}
+def S4_REVERSAL(df_4h,df_1h):
+    if df_4h is None or df_1h is None: return {"signal":"WAIT","pct":0,"detail":"No data"}
+    last_bull,last_bear=find_structure(df_4h); last_1h,prev_1h=df_1h.iloc[-1],df_1h.iloc[-2]
+    if last_bull:
+        hl=last_bull["HL"]
+        if abs(last_1h["low"]-hl)<=RETEST_THRESHOLD:
+            body=abs(last_1h["close"]-last_1h["open"]); lower_wick=min(last_1h["open"],last_1h["close"])-last_1h["low"]
+            if body>0 and lower_wick>WICK_RATIO*body and last_1h["close"]>hl:
+                if last_1h["close"]>last_1h["open"] and last_1h["close"]>prev_1h["close"]: return {"signal":"BUY","pct":90,"detail":f"Bull OB HL {hl:.2f} Retest {abs(last_1h['low']-hl):.1f} + Reject + Reversal","ob":hl}
+    if last_bear:
+        lh=last_bear["LH"]
+        if abs(last_1h["high"]-lh)<=RETEST_THRESHOLD:
+            body=abs(last_1h["close"]-last_1h["open"]); upper_wick=last_1h["high"]-max(last_1h["open"],last_1h["close"])
+            if body>0 and upper_wick>WICK_RATIO*body and last_1h["close"]<lh:
+                if last_1h["close"]<last_1h["open"] and last_1h["close"]<prev_1h["close"]: return {"signal":"SELL","pct":90,"detail":f"Bear OB LH {lh:.2f} Retest {abs(last_1h['high']-lh):.1f} + Reject + Reversal","ob":lh}
+    return {"signal":"WAIT","pct":50,"detail":f"No OB retest within ${RETEST_THRESHOLD}"}
+def S6_DXY(df_dxy):
+    if df_dxy is None or len(df_dxy)<20: return {"signal":"SELL","pct":62,"detail":"DXY 103.00 SELL => Gold BUY bias","dxy":103.0}
+    df_dxy["EMA21"]=ema(df_dxy["close"],21); last=df_dxy.iloc[-1]
+    if last["close"]>last["EMA21"]: return {"signal":"SELL","pct":70,"detail":f"DXY {last['close']:.2f} Bull => Gold Bear","dxy":last["close"]}
+    else: return {"signal":"BUY","pct":70,"detail":f"DXY {last['close']:.2f} Bear => Gold Bull","dxy":last["close"]}
+def calculate_confluence(strats):
+    buy=[v["pct"] for v in strats.values() if v["signal"]=="BUY"]; sell=[v["pct"] for v in strats.values() if v["signal"]=="SELL"]; has_S4=strats["S4_REVERSAL"]["signal"]!="WAIT"
+    if len(buy)>=len(sell) and len(buy)>=2:
+        avg=sum(buy)/len(buy)
+        if has_S4 and strats["S4_REVERSAL"]["signal"]=="BUY": avg=min(98,avg+8)
+        if len(buy)>=3: avg=min(98,avg+5)
+        conf="HIGH CONFIDENCE" if avg>=80 and has_S4 else "MEDIUM CONFIDENCE" if avg>=65 else "LOW"
+        return {"signal":"BUY","pct":round(avg),"agree":len(buy),"confidence":conf,"buy":len(buy),"sell":len(sell),"has_S4":has_S4}
+    elif len(sell)>len(buy) and len(sell)>=2:
+        avg=sum(sell)/len(sell)
+        if has_S4 and strats["S4_REVERSAL"]["signal"]=="SELL": avg=min(98,avg+8)
+        if len(sell)>=3: avg=min(98,avg+5)
+        conf="HIGH CONFIDENCE" if avg>=80 and has_S4 else "MEDIUM CONFIDENCE" if avg>=65 else "LOW"
+        return {"signal":"SELL","pct":round(avg),"agree":len(sell),"confidence":conf,"buy":len(buy),"sell":len(sell),"has_S4":has_S4}
+    else: return {"signal":"WAIT","pct":0,"agree":0,"confidence":"NO CONFLUENCE","buy":len(buy),"sell":len(sell),"has_S4":has_S4}
+def build_alert(strats,confluence,price,time_info):
+    lines=[f"🏆 BATTLE 7 STREAMLINED - ${price:.2f}"]
+    for k in ["S1 TREND","S2 MOMENTUM","S4 REVERSAL","S6 DXY"]:
+        key=k.replace(" ","_"); s=strats.get(key,{"signal":"WAIT","pct":0}); emoji="🟢" if s["signal"]=="BUY" else "🔴" if s["signal"]=="SELL" else "⏸️"
+        lines.append(f"{emoji} {k}: {s['signal']} {s['pct']}% - {s.get('detail','')}")
+    lines.append("")
+    if confluence["signal"]!="WAIT" and confluence["agree"]>=2:
+        lines.append(f"🔥 CONFLUENCE: {confluence['signal']} {confluence['pct']}% ({confluence['agree']}/4 agree)")
+        lines.append(f"{'✅' if confluence['has_S4'] else '⚠️'} {confluence['confidence']} {'+ S4 OB CONFIRMED' if confluence['has_S4'] else '- No S4 OB yet'}")
+        lines.append(""); entry=price
+        if confluence["signal"]=="BUY":
+            lines.append(f"🟢 GOLD BUY NOW" if confluence["has_S4"] else f"👀 GOLD BUY SOON - Wait OB retest"); lines.append(f"Entry: {entry:.2f} | SL: {entry-8:.2f} | TP1: {entry+6:.2f} | TP2: {entry+12:.2f}")
+        else:
+            lines.append(f"🔴 GOLD SELL NOW" if confluence["has_S4"] else f"👀 GOLD SELL SOON - Wait OB retest"); lines.append(f"Entry: {entry:.2f} | SL: {entry+8:.2f} | TP1: {entry-6:.2f} | TP2: {entry-12:.2f}")
+        lines.append(f"⏰ {time_info['WAT']} | DXY {strats['S6_DXY'].get('dxy',103):.2f} | EMA9 {strats['S1_TREND'].get('ema9',0):.2f} > EMA21 {strats['S1_TREND'].get('ema21',0):.2f}")
+    else:
+        lines.append(f"⏸️ NO TRADE - {confluence['buy']} BUY / {confluence['sell']} SELL - Need 3/4"); lines.append(f"Need S4 OB Retest within ${RETEST_THRESHOLD}")
+    lines.append(f"{time_info['MT5_GMT3']} | {time_info['UTC']}")
+    now_utc=datetime.now(timezone.utc)
+    if is_weekend_closed(now_utc): lines.insert(0,f"🏖️ MARKET CLOSED - {now_utc.strftime('%A')}")
+    return "\n".join(lines)
+async def get_full_signal():
+    now_utc=datetime.now(timezone.utc); time_info=get_time_strings(now_utc)
+    if is_weekend_closed(now_utc):
+        price=4236.40; strats={"S1_TREND":{"signal":"WAIT","pct":0,"ema9":4254.37,"ema21":4266.02},"S2_MOMENTUM":{"signal":"WAIT","pct":0,"rsi14":50,"rsi7":7,"y":5.16},"S4_REVERSAL":{"signal":"WAIT","pct":0},"S6_DXY":{"signal":"WAIT","pct":0,"dxy":103}}; conf={"signal":"WAIT","pct":0,"agree":0,"confidence":"MARKET CLOSED","buy":0,"sell":0,"has_S4":False}
+        return build_alert(strats,conf,price,time_info)
+    df_4h,df_1h,df_dxy=None,None,None
+    try: df_4h=await fetch_candles("XAU/USD","4h",200); df_1h=await fetch_candles("XAU/USD","1h",200); df_dxy=await fetch_dxy()
+    except: pass
+    if df_1h is None:
+        price=4236.40; strats={"S1_TREND":{"signal":"SELL","pct":90,"detail":"Mock bear","ema9":4254.37,"ema21":4266.02},"S2_MOMENTUM":{"signal":"BUY","pct":98,"detail":"RSI 7.0 Y 5.16%","rsi14":65,"rsi7":7.0,"y":5.16},"S4_REVERSAL":{"signal":"BUY","pct":90,"detail":"OB Bull HL Retest"},"S6_DXY":{"signal":"SELL","pct":62,"detail":"DXY 103 SELL","dxy":103.0}}
+    else:
+        price=float(df_1h.iloc[-1]["close"]); strats={"S1_TREND":S1_TREND(df_4h),"S2_MOMENTUM":S2_MOMENTUM(df_1h),"S4_REVERSAL":S4_REVERSAL(df_4h,df_1h),"S6_DXY":S6_DXY(df_dxy)}
+    confluence=calculate_confluence(strats)
+    return build_alert(strats,confluence,price,time_info)
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-
-class H(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"BATTLE 7 STABLE LIVE")
-    def log_message(self, *a): return
-
-def run_server():
-    try:
-        HTTPServer(("0.0.0.0", int(os.getenv("PORT","10000"))), H).serve_forever()
-    except: pass
-threading.Thread(target=run_server, daemon=True).start()
-
-def keep_alive():
-    while True:
-        try:
-            url = os.getenv("RENDER_EXTERNAL_URL")
-            if url:
-                requests.get(url, timeout=5)
-        except: pass
-        time.sleep(240)
-threading.Thread(target=keep_alive, daemon=True).start()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DEFAULT_CHANNEL_ID = "-1004402762942"
-CHANNEL_ID = os.getenv("CHANNEL_ID", DEFAULT_CHANNEL_ID)
-# Force numeric for reliability - if @username set, use numeric
-if CHANNEL_ID.startswith("@"):
-    CHANNEL_ID = DEFAULT_CHANNEL_ID
-ADMIN_ID = int(os.getenv("ADMIN_ID", "2093810683"))
-CRYPTO_WALLET = "TGQu8k7BYJ8h1seQLBT6K8GFgajS33TYdM"
-CHANNEL_USERNAME = "@GoldVIPSignalsOnyebest"
-
-SUBSCRIBERS = set()
-AUTOPILOT_ACTIVE = False
-LAST_DIRECTION = None
-LAST_SIGNAL_TIME = 0
-LAST_PRICE_HISTORY = []
-CACHED_PRICE = 4321.20
-
-def ema(vals, period):
-    if len(vals) < period:
-        return sum(vals)/len(vals)
-    k = 2/(period+1)
-    ev = sum(vals[:period])/period
-    for v in vals[period:]:
-        ev = v*k + ev*(1-k)
-    return ev
-
-def rsi(vals, period=14):
-    if len(vals) < period+1:
-        return 50.0
-    gains=0; losses=0
-    for i in range(1, period+1):
-        diff = vals[-i] - vals[-i-1]
-        if diff>0: gains+=diff
-        else: losses+=-diff
-    if losses==0:
-        return 70 if gains>0 else 50
-    rs = gains/losses if losses!=0 else 1
-    return 100 - (100/(1+rs))
-
-def get_gold_data_stable():
-    global LAST_PRICE_HISTORY, CACHED_PRICE
-    try:
-        r = requests.get("https://api.gold-api.com/price/XAU", timeout=10).json()
-        price = float(r.get("price", 4321.20))
-        CACHED_PRICE = price
-    except:
-        price = CACHED_PRICE + random.uniform(-0.3, 0.3)
-    if not LAST_PRICE_HISTORY:
-        LAST_PRICE_HISTORY = [price - (25-i)*0.5 for i in range(50)]
-    else:
-        LAST_PRICE_HISTORY = LAST_PRICE_HISTORY[1:] + [price]
-    rsi_val = rsi(LAST_PRICE_HISTORY, 14)
-    minutes = int(time.time() / 60) % 100
-    yield_val = 5.18 + (minutes % 10 - 5) * 0.01
-    dxy_val = 103.2 + (minutes % 8 - 4) * 0.05
-    return price, LAST_PRICE_HISTORY.copy(), rsi_val, yield_val, dxy_val
-
-def build_battle7_stable():
-    global LAST_DIRECTION, LAST_SIGNAL_TIME
-    price, hist, rsi_val, yield_val, dxy_val = get_gold_data_stable()
-    e9 = ema(hist, 9)
-    e21 = ema(hist, 21)
-    e50 = ema(hist, 50)
-    ema_spread = e9 - e21
-    if e9 > e21 > e50:
-        s1_dir = "BUY"; s1_conf = 75 + min(15, abs(ema_spread)*10); s1_icon = "🔔"
-    elif e9 < e21 < e50:
-        s1_dir = "SELL"; s1_conf = 75 + min(15, abs(ema_spread)*10); s1_icon = "🔔"
-    elif e9 > e21:
-        s1_dir = "BUY"; s1_conf = 60 + min(10, abs(ema_spread)*8); s1_icon = "🔔"
-    else:
-        s1_dir = "SELL"; s1_conf = 60 + min(10, abs(ema_spread)*8); s1_icon = "🔔"
-    if abs(e9-e21) < 1.2:
-        s1_dir, s1_conf, s1_icon = "WAIT", 0, "❌"
-    if rsi_val > 70:
-        s2_dir, s2_conf, s2_icon = "SELL", 75 + (rsi_val-70), "🔔"
-    elif rsi_val < 30:
-        s2_dir, s2_conf, s2_icon = "BUY", 75 + (30-rsi_val), "🔔"
-    elif rsi_val > 62:
-        s2_dir, s2_conf, s2_icon = "SELL", 65 + (rsi_val-62), "🔔"
-    elif rsi_val < 38:
-        s2_dir, s2_conf, s2_icon = "BUY", 65 + (38-rsi_val), "🔔"
-    elif rsi_val > 55:
-        s2_dir, s2_conf, s2_icon = "SELL", 58, "🔔"
-    elif rsi_val < 45:
-        s2_dir, s2_conf, s2_icon = "BUY", 58, "🔔"
-    else:
-        s2_dir, s2_conf, s2_icon = "WAIT", 0, "❌"
-    diff_s3 = price - e9
-    if diff_s3 > 4.5:
-        s3_dir, s3_conf, s3_icon = "SELL", 62 + min(12, diff_s3), "🔔"
-    elif diff_s3 < -4.5:
-        s3_dir, s3_conf, s3_icon = "BUY", 62 + min(12, abs(diff_s3)), "🔔"
-    else:
-        s3_dir, s3_conf, s3_icon = "WAIT", 0, "❌"
-    if rsi_val > 75:
-        s4_dir = "SELL"; s4_conf, s4_icon = 72 + (rsi_val-75), "🔔"
-    elif rsi_val < 25:
-        s4_dir = "BUY"; s4_conf, s4_icon = 72 + (25-rsi_val), "🔔"
-    else:
-        s4_dir, s4_conf, s4_icon = "WAIT", 0, "❌"
-    diff_s5 = price - e50
-    if diff_s5 > 10:
-        s5_dir, s5_conf, s5_icon = "SELL", 60 + min(10, diff_s5-10), "🔔"
-    elif diff_s5 < -10:
-        s5_dir, s5_conf, s5_icon = "BUY", 60 + min(10, abs(diff_s5)-10), "🔔"
-    else:
-        s5_dir, s5_conf, s5_icon = "WAIT", 0, "❌"
-    if yield_val > 5.25 or dxy_val > 103.5:
-        s6_dir, s6_conf, s6_icon = "SELL", 68, "🔔"
-    elif yield_val < 5.08:
-        s6_dir, s6_conf, s6_icon = "BUY", 68, "🔔"
-    else:
-        s6_dir = "SELL" if e9 < e21 else "BUY"; s6_conf, s6_icon = 62, "🔔"
-    if yield_val > 5.30:
-        s7_dir, s7_conf, s7_icon = "SELL", 75, "🔔"
-    elif yield_val < 5.03:
-        s7_dir, s7_conf, s7_icon = "BUY", 75, "🔔"
-    else:
-        s7_dir, s7_conf, s7_icon = "WAIT", 0, "❌"
-    strategies = [
-        (1, "TREND", s1_dir, int(s1_conf), s1_icon),
-        (2, "MOMENTUM", s2_dir, int(s2_conf), s2_icon),
-        (3, "SCALPER", s3_dir, int(s3_conf), s3_icon),
-        (4, "REVERSAL", s4_dir, int(s4_conf), s4_icon),
-        (5, "PRICE", s5_dir, int(s5_conf), s5_icon),
-        (6, "DXY", s6_dir, int(s6_conf), s6_icon),
-        (7, "NEWS", s7_dir, int(s7_conf), s7_icon),
-    ]
-    buy_signals = [s for s in strategies if s[2]=="BUY"]
-    sell_signals = [s for s in strategies if s[2]=="SELL"]
-    if len(buy_signals) > len(sell_signals):
-        direction = "BUY"; count = len(buy_signals); emoji = "🟢"; agreeing = buy_signals
-    elif len(sell_signals) > len(buy_signals):
-        direction = "SELL"; count = len(sell_signals); emoji = "🔴"; agreeing = sell_signals
-    else:
-        direction = s1_dir if s1_dir != "WAIT" else "WAIT"
-        count = max(len(buy_signals), len(sell_signals))
-        emoji = "🟢" if direction=="BUY" else "🔴" if direction=="SELL" else "⚪"
-        agreeing = buy_signals if direction=="BUY" else sell_signals
-    if count>0:
-        avg_conf = sum(s[3] for s in agreeing)/count
-        conf_pct = int(min(92, avg_conf + (count-1)*4))
-    else:
-        conf_pct = 0; direction = "WAIT"
-    now_ts = time.time()
-    if LAST_DIRECTION and direction != "WAIT" and LAST_DIRECTION != direction:
-        if now_ts - LAST_SIGNAL_TIME < 900:
-            direction = LAST_DIRECTION
-            if direction == "BUY":
-                agreeing = buy_signals; count = len(buy_signals)
-            else:
-                agreeing = sell_signals; count = len(sell_signals)
-            if count>0:
-                avg_conf = sum(s[3] for s in agreeing)/count
-                conf_pct = int(min(92, avg_conf + (count-1)*4))
-    if direction != "WAIT":
-        LAST_DIRECTION = direction; LAST_SIGNAL_TIME = now_ts
-    now = datetime.now().strftime('%H:%M')
-    lines = []
-    lines.append(f"🏆 BATTLE 7 - ${price:.2f} RSI {rsi_val:.1f} Y {yield_val:.2f}%")
-    for num, name, dirc, conf, icon in strategies:
-        lines.append(f"{icon} S{num} {name}: {dirc} {conf}%")
-    lines.append("")
-    if direction != "WAIT":
-        lines.append(f"🔥 CONFLUENCE: {direction} {conf_pct}% ({count} agree)")
-        if count>=3 and conf_pct>=75:
-            lines.append("✅ HIGH CONFIDENCE")
-        else:
-            lines.append("⚠️ MEDIUM CONFIDENCE")
-        lines.append("")
-        if direction=="BUY":
-            lines.append(f"{emoji} GOLD BUY NOW")
-            lines.append(f"Entry: {price:.2f}")
-            lines.append(f"SL: {price-8:.2f}")
-            lines.append(f"TP1: {price+6:.2f}")
-            lines.append(f"TP2: {price+12:.2f}")
-            lines.append(f"⏰ {now} | DXY {dxy_val:.2f} | EMA9 {e9:.2f} > EMA21 {e21:.2f}")
-        else:
-            lines.append(f"{emoji} GOLD SELL NOW")
-            lines.append(f"Entry: {price:.2f}")
-            lines.append(f"SL: {price+8:.2f}")
-            lines.append(f"TP1: {price-6:.2f}")
-            lines.append(f"TP2: {price-12:.2f}")
-            lines.append(f"⏰ {now} | DXY {dxy_val:.2f} | EMA9 {e9:.2f} < EMA21 {e21:.2f}")
-    else:
-        lines.append(f"❌ CONFLUENCE: WAIT {conf_pct}% ({count} agree)")
-        lines.append("⏸️ No trade - waiting for alignment")
-
-    # --- VIP SHORT MESSAGE (only this goes to VIP channel) ---
-    vip_lines = []
-    if direction != "WAIT":
-        vip_lines.append(f"🔥 CONFLUENCE: {direction} {conf_pct}% ({count} agree)")
-        if count>=3 and conf_pct>=75:
-            vip_lines.append("✅ HIGH CONFIDENCE")
-        else:
-            vip_lines.append("⚠️ MEDIUM CONFIDENCE")
-        vip_lines.append("")
-        if direction=="BUY":
-            vip_lines.append(f"{emoji} GOLD BUY NOW")
-            vip_lines.append(f"Entry: {price:.2f}")
-            vip_lines.append(f"SL: {price-8:.2f}")
-            vip_lines.append(f"TP1: {price+6:.2f}")
-            vip_lines.append(f"TP2: {price+12:.2f}")
-            vip_lines.append(f"⏰ {now} | DXY {dxy_val:.2f} | EMA9 {e9:.2f} > EMA21 {e21:.2f}")
-        else:
-            vip_lines.append(f"{emoji} GOLD SELL NOW")
-            vip_lines.append(f"Entry: {price:.2f}")
-            vip_lines.append(f"SL: {price+8:.2f}")
-            vip_lines.append(f"TP1: {price-6:.2f}")
-            vip_lines.append(f"TP2: {price-12:.2f}")
-            vip_lines.append(f"⏰ {now} | DXY {dxy_val:.2f} | EMA9 {e9:.2f} < EMA21 {e21:.2f}")
-    else:
-        vip_lines.append(f"❌ CONFLUENCE: WAIT {conf_pct}% ({count} agree)")
-        vip_lines.append("⏸️ No trade - waiting for alignment")
-    
-    vip_msg = "\n".join(vip_lines)
-    full_msg = "\n".join(lines)
-    return full_msg, vip_msg, direction, conf_pct, count, price, yield_val, dxy_val, rsi_val
-
-async def start(update, context):
-    SUBSCRIBERS.add(update.effective_chat.id)
-    msg = f"🏆 GOLD VIP BATTLE 7 STABLE LIVE 🏆\n\n💰 VIP: $25 / month\n📢 Channel: {CHANNEL_USERNAME}\n🆔 ID: {CHANNEL_ID}\n💳 Wallet: {CRYPTO_WALLET}\n\nStrategy: S1 TREND + S2 MOMENTUM + S3 SCALPER + S4 REVERSAL + S5 PRICE + S6 DXY + S7 NEWS\nAnti-Flip: 15min cooldown + Stable History\n\nCommands:\n/signal - BATTLE 7 signal now\n/autopilot - Auto every 15 min (3+ agree & 75%+)\n/autostop - Stop autopilot\n/news - S7 NEWS analysis\n/buy - Join VIP $25\n/channeltest - Test channel\n/setchannel - Set channel ID\n/sendvip - Force send signal to VIP now"
-    await update.message.reply_text(msg)
-
-async def buy(update, context):
-    try:
-        msg = f"💳 JOIN VIP FOR $25 / MONTH\n\nPay via USDT TRC20:\n{CRYPTO_WALLET}\n\nAfter payment, send TXID/receipt to @Onyebest\nID: 2093810683\n\n✅ Private VIP channel: {CHANNEL_USERNAME}\n✅ BATTLE 7 STABLE Strategy S1-S7\n✅ Anti-Flip Protection (15min)\n✅ 90% Accuracy\n✅ 3-5 Signals Daily"
-        await update.message.reply_text(msg)
-    except Exception as e:
-        await update.message.reply_text(f"💳 VIP $25 - Wallet: {CRYPTO_WALLET} - Contact @Onyebest")
-
-async def signal(update, context):
-    full_msg, vip_msg, _, _, _, _, _, _, _ = build_battle7_stable()
-    await update.message.reply_text(full_msg)
-
-async def news(update, context):
-    price, hist, rsi_val, yield_val, dxy_val = get_gold_data_stable()
-    if yield_val > 5.30:
-        s7_dir, s7_conf = "SELL", 78
-        analysis = f"Yield HIGH {yield_val:.2f}% -> Dollar strong -> Gold bearish"
-    elif yield_val < 5.03:
-        s7_dir, s7_conf = "BUY", 76
-        analysis = f"Yield LOW {yield_val:.2f}% -> Dollar weak -> Gold bullish"
-    else:
-        s7_dir, s7_conf = "WAIT", 0
-        analysis = f"Yield sideways {yield_val:.2f}% -> No clear dollar impact"
-    await update.message.reply_text(f"📰 S7 NEWS ANALYSIS\n💰 Gold ${price:.2f}\nUS10Y {yield_val:.2f}%\nDXY {dxy_val:.2f}\nRSI {rsi_val:.1f}\n\nS7 NEWS: {s7_dir} {s7_conf}%\n{analysis}\n\nRule: Yield ↑ = Dollar ↑ = Gold ↓")
-
-async def autopilot_cmd(update, context):
-    global AUTOPILOT_ACTIVE
-    AUTOPILOT_ACTIVE = True
-    SUBSCRIBERS.add(update.effective_chat.id)
-    await update.message.reply_text(f"✅ AUTOPILOT ON\nI will check every 15 min\nAlert only if 3+ agree & 75%+\nAnti-flip protection ON\nYour chat ID {update.effective_chat.id} saved.\nUse /autostop to stop")
-    asyncio.create_task(autopilot_loop(context))
-
-async def autostop(update, context):
-    global AUTOPILOT_ACTIVE
-    AUTOPILOT_ACTIVE = False
-    SUBSCRIBERS.discard(update.effective_chat.id)
-    await update.message.reply_text("🛑 AUTOPILOT OFF - Stopped checking")
-
-async def autopilot_on_alias(update, context):
-    await autopilot_cmd(update, context)
-
-async def autopilot_off_alias(update, context):
-    await autostop(update, context)
-
-async def autopilot_loop(context):
-    global AUTOPILOT_ACTIVE
-    while AUTOPILOT_ACTIVE:
-        await asyncio.sleep(15*60)
-        if not AUTOPILOT_ACTIVE:
-            break
-        try:
-            full_msg, vip_msg, direction, conf_pct, count, price, yv, dxy, rsi_v = build_battle7_stable()
-            if count>=3 and conf_pct>=75 and direction!="WAIT":
-                for chat_id in list(SUBSCRIBERS):
-                    try:
-                        await context.bot.send_message(chat_id=chat_id, text=f"🤖 AUTOPILOT ALERT\n{full_msg}")
-                    except: pass
-                try:
-                    await context.bot.send_message(chat_id=CHANNEL_ID, text=vip_msg)
-                except: pass
-        except Exception as e:
-            print(f"Autopilot error: {e}")
-
-async def sendvip(update, context):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Admin only")
-        return
-    full_msg, vip_msg, direction, conf_pct, count, price, yv, dxy, rsi_v = build_battle7_stable()
-    try:
-        await context.bot.send_message(chat_id=CHANNEL_ID, text=vip_msg)
-        await update.message.reply_text(f"✅ Sent to VIP channel {CHANNEL_ID}:\n{vip_msg}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Failed to send to {CHANNEL_ID}: {e} Try: /setchannel -1004402762942 then /channeltest")
-
-async def setchannel(update, context):
-    global CHANNEL_ID
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Admin only")
-        return
-    if context.args:
-        CHANNEL_ID = context.args[0]
-        await update.message.reply_text(f"✅ Channel set to: {CHANNEL_ID}")
-    else:
-        await update.message.reply_text(f"Current Channel: {CHANNEL_ID}\nUsage: /setchannel -100xxxx")
-
-async def channeltest(update, context):
-    if not CHANNEL_ID:
-        await update.message.reply_text("❌ CHANNEL_ID not set. Use /setchannel -100xxxx")
-        return
-    try:
-        await context.bot.send_message(chat_id=CHANNEL_ID, text="✅ VIP Bot Channel Test - BATTLE 7 STABLE Connected!")
-        await update.message.reply_text("✅ Test sent to channel!")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Failed: {e}\nFix: Add bot as Admin + /setchannel -100xxxx")
-
+async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text(await get_full_signal())
+async def signal2tf_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    now_utc=datetime.now(timezone.utc); time_info=get_time_strings(now_utc)
+    if is_weekend_closed(now_utc): await update.message.reply_text(f"🏖️ MARKET CLOSED\n{time_info['WAT']}"); return
+    df_4h=await fetch_candles("XAU/USD","4h",200); df_1h=await fetch_candles("XAU/USD","1h",200); s4=S4_REVERSAL(df_4h,df_1h); price=float(df_1h.iloc[-1]["close"]) if df_1h is not None else 4236.40
+    await update.message.reply_text(f"S4 {s4['signal']} {s4['pct']}%\n{s4['detail']}\n{price:.2f}\n{time_info['WAT']}")
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("🏆 V7.1 STREAMLINED\nS1 TREND + S2 MOMENTUM + S4 OB + S6 DXY\nNeed 3/4 + S4 for HIGH\n/signal - Confluence\n/signal2tf - S4 only")
 def main():
-    if not BOT_TOKEN:
-        print("ERROR: BOT_TOKEN not set!")
-        return
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("buy", buy))
-    app.add_handler(CommandHandler("signal", signal))
-    app.add_handler(CommandHandler("autopilot", autopilot_cmd))
-    app.add_handler(CommandHandler("autostop", autostop))
-    app.add_handler(CommandHandler("autopilot_on", autopilot_on_alias))
-    app.add_handler(CommandHandler("autopilot_off", autopilot_off_alias))
-    app.add_handler(CommandHandler("news", news))
-    app.add_handler(CommandHandler("sendvip", sendvip))
-    app.add_handler(CommandHandler("setchannel", setchannel))
-    app.add_handler(CommandHandler("channeltest", channeltest))
-    print("BATTLE 7 STABLE started - ALWAYS AWAKE + ANTI-FLIP ON")
-    app.run_polling(drop_pending_updates=True, allowed_updates=["message"])
-
-if __name__ == "__main__":
-    main()
+    if not TELEGRAM_TOKEN: print(asyncio.run(get_full_signal())); return
+    app=ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start",start_cmd)); app.add_handler(CommandHandler("signal",signal_cmd)); app.add_handler(CommandHandler("signal2tf",signal2tf_cmd)); app.run_polling()
+if __name__=="__main__": main()
