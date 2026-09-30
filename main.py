@@ -917,20 +917,54 @@ def run_backtest_2tf():
 def get_gold_and_dxy():
     use_td=bool(TWELVE_KEY)
     candles_4h=None; candles_1h=None; candles_dxy_4h=None; candles_dxy_1h=None
+    dxy_source="NONE"
     if use_td:
         candles_4h=fetch_twelvedata_candles("XAU/USD","4h",TWELVE_KEY,150)
         candles_1h=fetch_twelvedata_candles("XAU/USD","1h",TWELVE_KEY,150)
-        # Try DXY symbols - TwelveData uses DXY or USD/INDEX
-        candles_dxy_4h=fetch_twelvedata_candles("DXY/USD","4h",TWELVE_KEY,150)
-        if not candles_dxy_4h:
-            candles_dxy_4h=fetch_twelvedata_candles("DXY","4h",TWELVE_KEY,150)
-        if not candles_dxy_4h:
-            candles_dxy_4h=fetch_twelvedata_candles("USD/INDEX","4h",TWELVE_KEY,150)
-        candles_dxy_1h=fetch_twelvedata_candles("DXY/USD","1h",TWELVE_KEY,150)
-        if not candles_dxy_1h:
-            candles_dxy_1h=fetch_twelvedata_candles("DXY","1h",TWELVE_KEY,150)
-        if not candles_dxy_1h:
-            candles_dxy_1h=fetch_twelvedata_candles("USD/INDEX","1h",TWELVE_KEY,150)
+        # Try many DXY symbols - TwelveData naming is inconsistent
+        dxy_symbols_4h = ["DXY","DXY/USD","USD/INDEX","DX","UUP","USDX","DOLLAR_INDEX"]
+        dxy_symbols_1h = ["DXY","DXY/USD","USD/INDEX","DX","UUP","USDX","DOLLAR_INDEX"]
+        for sym in dxy_symbols_4h:
+            candles_dxy_4h=fetch_twelvedata_candles(sym,"4h",TWELVE_KEY,150)
+            if candles_dxy_4h and len(candles_dxy_4h)>10:
+                dxy_source=sym + " 4H"
+                print(f"DXY found with symbol {sym} 4H")
+                break
+        for sym in dxy_symbols_1h:
+            candles_dxy_1h=fetch_twelvedata_candles(sym,"1h",TWELVE_KEY,150)
+            if candles_dxy_1h and len(candles_dxy_1h)>10:
+                if dxy_source=="NONE":
+                    dxy_source=sym + " 1H"
+                else:
+                    dxy_source+=f" + {sym} 1H"
+                print(f"DXY found with symbol {sym} 1H")
+                break
+        # Fallback: Use EUR/USD inverse as DXY proxy (EUR 57.6% of DXY)
+        # EUR/USD BULLISH -> DXY BEARISH, EUR/USD BEARISH -> DXY BULLISH
+        if not candles_dxy_4h or not candles_dxy_1h:
+            print("DXY not found, trying EUR/USD as inverse proxy")
+            eurusd_4h=fetch_twelvedata_candles("EUR/USD","4h",TWELVE_KEY,150)
+            eurusd_1h=fetch_twelvedata_candles("EUR/USD","1h",TWELVE_KEY,150)
+            if eurusd_4h and eurusd_1h:
+                # Invert EUR/USD to simulate DXY
+                # EUR up = DXY down, so invert highs/lows/closes
+                def invert_candles(candles):
+                    inv=[]
+                    for c in candles:
+                        # Simple inversion: DXY approx = 1 / EURUSD * factor, but for structure we invert trend
+                        # For structure detection, we invert price: high becomes -low etc
+                        inv.append({"datetime":c["datetime"],"open":-c["open"],"high":-c["low"],"low":-c["high"],"close":-c["close"]})
+                    return inv
+                if not candles_dxy_4h:
+                    candles_dxy_4h=invert_candles(eurusd_4h)
+                    dxy_source="EUR/USD inverse 4H proxy"
+                if not candles_dxy_1h:
+                    candles_dxy_1h=invert_candles(eurusd_1h)
+                    if "EUR" not in dxy_source:
+                        dxy_source+=" + EUR/USD inverse 1H proxy"
+                    else:
+                        dxy_source="EUR/USD inverse 4H+1H proxy"
+                print(f"Using EUR/USD inverse as DXY proxy: {dxy_source}")
     if not candles_1h:
         return None
     state_4h=build_structure_state(candles_4h)
@@ -938,8 +972,19 @@ def get_gold_and_dxy():
     state_dxy_4h=build_structure_state(candles_dxy_4h) if candles_dxy_4h else None
     state_dxy_1h=build_structure_state(candles_dxy_1h) if candles_dxy_1h else None
     price=candles_1h[-1]["close"]
-    dxy_price=candles_dxy_1h[-1]["close"] if candles_dxy_1h else 0
-    return {"price":price, "dxy_price":dxy_price, "candles_4h":candles_4h, "candles_1h":candles_1h, "candles_dxy_4h":candles_dxy_4h, "candles_dxy_1h":candles_dxy_1h, "state_4h":state_4h, "state_1h":state_1h, "state_dxy_4h":state_dxy_4h, "state_dxy_1h":state_dxy_1h, "use_td":use_td}
+    if candles_dxy_1h and candles_dxy_1h[-1]["close"]<0:
+        # This is inverted EUR/USD proxy, convert back to positive for display
+        dxy_price=abs(candles_dxy_1h[-1]["close"])
+        # Try get real DXY price from EUR/USD original for display
+        try:
+            real_eur=fetch_twelvedata_candles("EUR/USD","1h",TWELVE_KEY,1)
+            if real_eur:
+                dxy_price=real_eur[-1]["close"]  # Show EUR/USD price but indicate proxy
+        except:
+            pass
+    else:
+        dxy_price=candles_dxy_1h[-1]["close"] if candles_dxy_1h else 0
+    return {"price":price, "dxy_price":dxy_price, "dxy_source":dxy_source, "candles_4h":candles_4h, "candles_1h":candles_1h, "candles_dxy_4h":candles_dxy_4h, "candles_dxy_1h":candles_dxy_1h, "state_4h":state_4h, "state_1h":state_1h, "state_dxy_4h":state_dxy_4h, "state_dxy_1h":state_dxy_1h, "use_td":use_td}
 
 def build_setup_s1s6_best():
     """V7.0 BEST COMBO: S1 TREND (63.5%) + S6 DXY (63.5%) = Best for Gold"""
@@ -948,6 +993,7 @@ def build_setup_s1s6_best():
         return "⚠️ No TwelveData", "⚠️ No data", "WAIT", 0, 0, 0,0,0,0,0,0
     price=data["price"]
     dxy_price=data["dxy_price"]
+    dxy_source=data.get("dxy_source","DXY")
     s4h=data["state_4h"]; s1h=data["state_1h"]; sdxy4h=data["state_dxy_4h"]; sdxy1h=data["state_dxy_1h"]
     
     def calc_atr(candles):
@@ -1061,11 +1107,11 @@ def build_setup_s1s6_best():
     src="TwelveData" if data["use_td"] else "No Data"
     lines=[]
     lines.append(f"🏆 GOLD VIP V7.0 S1+S6 BEST COMBO 63.5% {src} 🏆")
-    lines.append(f"💰 Gold ${price:.2f} | DXY {dxy_price:.2f} | {now}")
+    lines.append(f"💰 Gold ${price:.2f} | DXY {dxy_price:.2f} ({dxy_source}) | {now}")
     lines.append("")
     lines.append(f"📊 S1 TREND: {s1_trend} {s1_conf}% - H4 {s4h.state} - Prot H {s4h.protected_high or 0:.2f} L {s4h.protected_low or 0:.2f}")
     lines.append(f"   S1 Backtest 5D: 54/85 = 63.5% - BEST for Gold")
-    lines.append(f"📊 S6 DXY: {s6_dxy} {s6_conf}% - DXY Trend {dxy_trend} {dxy_price:.2f} - Inverse to Gold")
+    lines.append(f"📊 S6 DXY: {s6_dxy} {s6_conf}% - DXY Trend {dxy_trend} {dxy_price:.2f} ({dxy_source}) - Inverse to Gold")
     lines.append(f"   S6 Backtest 5D: 54/85 = 63.5% - BEST for Gold")
     lines.append(f"📊 S2 MOMENTUM: {s2_mom} - H1 BOS {s1h.last_bos['type'] if s1h.last_bos else 'NONE'} @ {s1h.last_bos['level'] if s1h.last_bos else 0:.2f}")
     lines.append("")
