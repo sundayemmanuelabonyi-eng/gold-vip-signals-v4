@@ -1061,23 +1061,81 @@ def build_setup_s1s6_best():
     s6_dxy = "WAIT"
     s6_conf = 0
     dxy_trend = "WAIT"
-    if sdxy4h:
-        if sdxy4h.state=="BULLISH":
-            dxy_trend="BULLISH"
-            s6_dxy="SELL"; s6_conf=72  # As per screenshot S6 DXY: SELL 72%
-        elif sdxy4h.state=="BEARISH":
-            dxy_trend="BEARISH"
+    # Helper: simple trend fallback when structure is WAIT
+    def simple_trend(state, candles):
+        if not candles or len(candles)<20:
+            return "WAIT"
+        # Compare last close vs 20 ago and vs SMA
+        try:
+            last=candles[-1]["close"]
+            prev=candles[-20]["close"]
+            if last>prev*1.001:
+                return "BULLISH"
+            elif last<prev*0.999:
+                return "BEARISH"
+            else:
+                return "WAIT"
+        except:
+            return "WAIT"
+    
+    dxy_state_to_use = None
+    dxy_candles_to_use = None
+    if sdxy4h and sdxy4h.state!="WAIT":
+        dxy_state_to_use=sdxy4h.state
+        dxy_candles_to_use=data["candles_dxy_4h"]
+    elif sdxy4h and data["candles_dxy_4h"]:
+        # Try simple trend fallback for 4H
+        simple=simple_trend(sdxy4h, data["candles_dxy_4h"])
+        if simple!="WAIT":
+            dxy_state_to_use=simple
+            dxy_candles_to_use=data["candles_dxy_4h"]
+            dxy_trend=simple
+        else:
+            dxy_state_to_use=sdxy4h.state
+    if not dxy_state_to_use or dxy_state_to_use=="WAIT":
+        if sdxy1h and sdxy1h.state!="WAIT":
+            dxy_state_to_use=sdxy1h.state
+            dxy_candles_to_use=data["candles_dxy_1h"]
+        elif sdxy1h and data["candles_dxy_1h"]:
+            simple=simple_trend(sdxy1h, data["candles_dxy_1h"])
+            if simple!="WAIT":
+                dxy_state_to_use=simple
+                dxy_candles_to_use=data["candles_dxy_1h"]
+    
+    if dxy_state_to_use:
+        dxy_trend=dxy_state_to_use
+        if dxy_trend=="BULLISH":
+            s6_dxy="SELL"; s6_conf=72
+        elif dxy_trend=="BEARISH":
             s6_dxy="BUY"; s6_conf=72
         else:
-            dxy_trend="WAIT"
-            s6_dxy="WAIT"; s6_conf=0
-    else:
-        # Fallback: use 1H DXY if 4H not available
-        if sdxy1h:
-            if sdxy1h.state=="BULLISH":
-                dxy_trend="BULLISH"; s6_dxy="SELL"; s6_conf=72
-            elif sdxy1h.state=="BEARISH":
-                dxy_trend="BEARISH"; s6_dxy="BUY"; s6_conf=72
+            # Even if WAIT, try EUR/USD inverse logic - if we have EUR/USD proxy, invert
+            if data["candles_dxy_4h"] and any(c["close"]<0 for c in data["candles_dxy_4h"][-5:]):
+                # This is EUR/USD inverse proxy, so flip logic already inverted
+                # For proxy, BULLISH in inverted means EUR BEARISH = DXY BULLISH
+                if dxy_trend=="BULLISH":
+                    s6_dxy="SELL"; s6_conf=72
+                elif dxy_trend=="BEARISH":
+                    s6_dxy="BUY"; s6_conf=72
+    
+    # If still WAIT, force using EUR/USD directly as last resort
+    if s6_dxy=="WAIT":
+        try:
+            eurusd_4h=data.get("candles_dxy_4h") # actually may be EUR/USD proxy inverted
+            # Try fetch fresh EUR/USD to determine DXY
+            if TWELVE_KEY:
+                eur_candles=fetch_twelvedata_candles("EUR/USD","4h",TWELVE_KEY,50)
+                if eur_candles and len(eur_candles)>=20:
+                    last=eur_candles[-1]["close"]
+                    prev=eur_candles[-20]["close"]
+                    if last>prev: # EUR up = DXY down = Gold BUY
+                        dxy_trend="BEARISH (EUR/USD BULLISH proxy)"
+                        s6_dxy="BUY"; s6_conf=63
+                    elif last<prev:
+                        dxy_trend="BULLISH (EUR/USD BEARISH proxy)"
+                        s6_dxy="SELL"; s6_conf=63
+        except:
+            pass
 
     # S2 MOMENTUM: 1H momentum (BOS)
     s2_mom = "WAIT"
@@ -1210,11 +1268,40 @@ def run_backtest_s1s6():
             s1="WAIT"
             if state_4h.state=="BULLISH": s1="BUY"
             elif state_4h.state=="BEARISH": s1="SELL"
-            # S6 DXY inverse
+            else:
+                # Fallback simple trend for Gold 4H
+                try:
+                    if len(hist_1h)>=20 and hist_1h[-1]["close"]>hist_1h[-20]["close"]*1.001:
+                        s1="BUY"
+                    elif len(hist_1h)>=20 and hist_1h[-1]["close"]<hist_1h[-20]["close"]*0.999:
+                        s1="SELL"
+                except:
+                    pass
+            # S6 DXY inverse - with fallback
             s6="WAIT"
             if state_dxy_4h:
                 if state_dxy_4h.state=="BULLISH": s6="SELL"
                 elif state_dxy_4h.state=="BEARISH": s6="BUY"
+                else:
+                    # Simple trend fallback
+                    try:
+                        if hist_dxy_1h and len(hist_dxy_1h)>=20:
+                            if hist_dxy_1h[-1]["close"]>hist_dxy_1h[-20]["close"]*1.001:
+                                s6="SELL"  # DXY up = Gold down
+                            elif hist_dxy_1h[-1]["close"]<hist_dxy_1h[-20]["close"]*0.999:
+                                s6="BUY"
+                    except:
+                        pass
+            else:
+                # Try simple trend from DXY 1H if 4H missing
+                try:
+                    if hist_dxy_1h and len(hist_dxy_1h)>=20:
+                        if hist_dxy_1h[-1]["close"]>hist_dxy_1h[-20]["close"]*1.001:
+                            s6="SELL"
+                        elif hist_dxy_1h[-1]["close"]<hist_dxy_1h[-20]["close"]*0.999:
+                            s6="BUY"
+                except:
+                    pass
 
             if s1=="WAIT" or s6=="WAIT": continue
             if s1!=s6: continue  # Only when agree - best combo
