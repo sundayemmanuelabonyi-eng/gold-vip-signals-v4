@@ -177,14 +177,19 @@ def fetch_twelvedata_candles(symbol="XAU/USD", interval="1h", apikey="", outputs
     try:
         url=f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize={outputsize}&apikey={apikey}&format=JSON"
         r=requests.get(url,timeout=15).json()
-        if "values" not in r: return None
+        if "values" not in r:
+            # print(f"TwelveData no values for {symbol} {interval}: {r.get('message','')} {r.get('code','')}")
+            return None
         vals=r["values"][::-1]
         candles=[]
         for v in vals:
-            candles.append({"datetime":v["datetime"],"open":float(v["open"]),"high":float(v["high"]),"low":float(v["low"]),"close":float(v["close"])})
-        return candles
+            try:
+                candles.append({"datetime":v["datetime"],"open":float(v["open"]),"high":float(v["high"]),"low":float(v["low"]),"close":float(v["close"])})
+            except:
+                continue
+        return candles if len(candles)>0 else None
     except Exception as e:
-        print(f"Fetch error {interval}: {e}"); return None
+        print(f"Fetch error {symbol} {interval}: {e}"); return None
 
 def find_swings_2_2(candles):
     highs=[]; lows=[]
@@ -972,18 +977,45 @@ def get_gold_and_dxy():
     state_dxy_4h=build_structure_state(candles_dxy_4h) if candles_dxy_4h else None
     state_dxy_1h=build_structure_state(candles_dxy_1h) if candles_dxy_1h else None
     price=candles_1h[-1]["close"]
-    if candles_dxy_1h and candles_dxy_1h[-1]["close"]<0:
-        # This is inverted EUR/USD proxy, convert back to positive for display
-        dxy_price=abs(candles_dxy_1h[-1]["close"])
-        # Try get real DXY price from EUR/USD original for display
+    # FIX DXY 0.00: use 4H close if 1H missing, use 1H if available, use EUR/USD proxy if both missing
+    if candles_dxy_1h and len(candles_dxy_1h)>0 and candles_dxy_1h[-1]["close"]!=0:
+        raw_close=candles_dxy_1h[-1]["close"]
+        if raw_close<0:  # inverted EUR/USD proxy
+            dxy_price=abs(raw_close)
+            try:
+                real_eur=fetch_twelvedata_candles("EUR/USD","1h",TWELVE_KEY,1)
+                if real_eur and len(real_eur)>0:
+                    dxy_price=real_eur[-1]["close"]
+            except:
+                pass
+        else:
+            dxy_price=raw_close
+    elif candles_dxy_4h and len(candles_dxy_4h)>0:
+        raw_close=candles_dxy_4h[-1]["close"]
+        dxy_price=abs(raw_close) if raw_close<0 else raw_close
+        if dxy_price==0:
+            # Try EUR/USD as final fallback
+            try:
+                eurusd=fetch_twelvedata_candles("EUR/USD","1h",TWELVE_KEY,1)
+                if eurusd:
+                    dxy_price=eurusd[-1]["close"]
+                    if dxy_source=="NONE":
+                        dxy_source="EUR/USD proxy (DXY symbols failed)"
+            except:
+                pass
+    else:
+        dxy_price=0
+        # Last resort EUR/USD
         try:
-            real_eur=fetch_twelvedata_candles("EUR/USD","1h",TWELVE_KEY,1)
-            if real_eur:
-                dxy_price=real_eur[-1]["close"]  # Show EUR/USD price but indicate proxy
+            eurusd=fetch_twelvedata_candles("EUR/USD","1h",TWELVE_KEY,1)
+            if eurusd:
+                dxy_price=eurusd[-1]["close"]
+                dxy_source="EUR/USD proxy final"
         except:
             pass
-    else:
-        dxy_price=candles_dxy_1h[-1]["close"] if candles_dxy_1h else 0
+    # Ensure not zero - if still zero, set to 100 placeholder for display but keep WAIT state
+    if dxy_price==0:
+        dxy_price=0.00
     return {"price":price, "dxy_price":dxy_price, "dxy_source":dxy_source, "candles_4h":candles_4h, "candles_1h":candles_1h, "candles_dxy_4h":candles_dxy_4h, "candles_dxy_1h":candles_dxy_1h, "state_4h":state_4h, "state_1h":state_1h, "state_dxy_4h":state_dxy_4h, "state_dxy_1h":state_dxy_1h, "use_td":use_td}
 
 def build_setup_s1s6_best():
@@ -1448,9 +1480,24 @@ async def backtest_s1s6_cmd(update, context):
 
 
 
+async def error_handler(update, context):
+    print(f"Telegram error: {context.error}")
+    # Ignore conflict errors - happens when 2 instances polling
+    if "Conflict" in str(context.error):
+        print("Conflict detected - another bot instance running. Sleeping 10s...")
+        import time; time.sleep(10)
+
 def main():
     if not BOT_TOKEN: print("ERROR: BOT_TOKEN not set!"); return
+    # Delete webhook before polling to avoid Conflict error
+    try:
+        import requests
+        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=10)
+        print("Webhook deleted, drop pending updates")
+    except Exception as e:
+        print(f"Webhook delete failed: {e}")
     app=ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("buy", buy))
     app.add_handler(CommandHandler("signal", signal))
