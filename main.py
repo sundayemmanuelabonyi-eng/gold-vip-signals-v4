@@ -1,21 +1,64 @@
 
-import os, threading, asyncio, requests, random
+import os, threading, asyncio, requests, random, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+# === KEEP AWAKE TRICK - FIX FOR RENDER SLEEPING ===
+PORT = int(os.getenv("PORT","10000"))
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "")  # Set this in Render env if you have external URL
+
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers()
-        self.wfile.write(b"S1+S6 BEST COMBO 63.5% LIVE")
+        try:
+            self.wfile.write(b"S1+S6 BEST COMBO 63.5% LIVE - AWAKE")
+        except: pass
+    def do_HEAD(self):
+        self.send_response(200); self.end_headers()
     def log_message(self,*a): return
 
 def run_server():
     try:
-        HTTPServer(("0.0.0.0", int(os.getenv("PORT","10000"))), H).serve_forever()
-    except: pass
+        HTTPServer(("0.0.0.0", PORT), H).serve_forever()
+    except Exception as e:
+        print(f"Server error: {e}")
+
 threading.Thread(target=run_server, daemon=True).start()
+
+def keep_awake_trick():
+    """Trick we used for other bots - self ping every 4 min to prevent Render sleep"""
+    while True:
+        try:
+            time.sleep(240)  # 4 minutes - before Render 15 min sleep
+            # Ping self
+            try:
+                requests.get(f"http://localhost:{PORT}", timeout=5)
+            except: pass
+            # Ping external URL if set
+            if RENDER_URL:
+                try:
+                    requests.get(RENDER_URL, timeout=10)
+                    print(f"Keep-awake ping to {RENDER_URL}")
+                except: pass
+            # Ping gold API to keep activity + prevent idle
+            try:
+                requests.get("https://api.gold-api.com/price/XAU", timeout=5)
+            except: pass
+            # Also ping Telegram API to keep bot alive
+            bot_token = os.getenv("BOT_TOKEN")
+            if bot_token:
+                try:
+                    requests.get(f"https://api.telegram.org/bot{bot_token}/getMe", timeout=5)
+                except: pass
+            print(f"Keep-awake trick at {datetime.now().strftime('%H:%M:%S')} - Bot alive")
+        except Exception as e:
+            print(f"Keep-awake error: {e}")
+            time.sleep(60)
+
+threading.Thread(target=keep_awake_trick, daemon=True).start()
+print("Keep-awake trick started - ping every 4 min")
 
 BOT_TOKEN=os.getenv("BOT_TOKEN")
 DEFAULT_CHANNEL_ID="-1004402762942"
@@ -26,6 +69,7 @@ CHANNEL_USERNAME="@GoldVIPSignalsOnyebest"
 
 SUBSCRIBERS=set()
 AUTOPILOT_ACTIVE=False
+AUTOPILOT_TASK=None
 
 def ema(vals, period):
     if len(vals)<period: return sum(vals)/len(vals)
@@ -128,7 +172,7 @@ def build_s1s6():
 
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
     SUBSCRIBERS.add(update.effective_chat.id)
-    await update.message.reply_text(f"🏆 GOLD VIP S1+S6 BEST COMBO 63.5% 🏆\n\n💰 VIP: $25/month\n📢 {CHANNEL_USERNAME}\n🆔 {CHANNEL_ID}\n💳 {CRYPTO_WALLET}\n\nOnly S1 TREND 54/85=63.5% + S6 DXY 54/85=63.5% = Best combo\nOnly trade when S1+S6 agree = 80% HIGH CONFIDENCE\n\nCommands:\n/signal - S1+S6 now\n/bestcombo - best combo\n/confluence - same\n/s1s6 - same\n/autopilot - auto 15 min\n/autostop - stop\n/buy - Join VIP")
+    await update.message.reply_text(f"🏆 GOLD VIP S1+S6 BEST COMBO 63.5% 🏆\n\n💰 VIP: $25/month\n📢 {CHANNEL_USERNAME}\n🆔 {CHANNEL_ID}\n💳 {CRYPTO_WALLET}\n\nOnly S1 TREND 54/85=63.5% + S6 DXY 54/85=63.5% = Best combo\nOnly trade when S1+S6 agree = 80% HIGH CONFIDENCE\n\nCommands:\n/signal - S1+S6 now\n/bestcombo - best combo\n/confluence - same\n/s1s6 - same\n/autopilot - auto 15 min (keep-awake ON)\n/autostop - stop\n/buy - Join VIP\n\n✅ Keep-awake trick ACTIVE - Bot won't sleep")
 
 async def buy(update:Update,context:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"💳 JOIN VIP $25/MONTH\nUSDT TRC20:\n{CRYPTO_WALLET}\nAfter pay send TXID to @Onyebest\n✅ S1+S6 BEST COMBO 63.5%")
@@ -142,32 +186,68 @@ async def bestcombo_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 async def autopilot_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    global AUTOPILOT_ACTIVE
+    global AUTOPILOT_ACTIVE, AUTOPILOT_TASK
     AUTOPILOT_ACTIVE=True
     SUBSCRIBERS.add(update.effective_chat.id)
-    await update.message.reply_text(f"✅ AUTOPILOT S1+S6 ON - Only when S1+S6 agree\nID {update.effective_chat.id} saved")
-    asyncio.create_task(autopilot_loop(context))
+    # Cancel old task if exists
+    if AUTOPILOT_TASK and not AUTOPILOT_TASK.done():
+        AUTOPILOT_TASK.cancel()
+    AUTOPILOT_TASK = asyncio.create_task(autopilot_loop(context))
+    await update.message.reply_text(
+        f"✅ AUTOPILOT S1+S6 ON - Keep-awake trick ACTIVE\n"
+        f"Only when S1+S6 agree (2 agree) = HIGH CONFIDENCE\n"
+        f"ID {update.effective_chat.id} saved\n"
+        f"⏰ Checks every 15 min\n"
+        f"💡 Trick: Self-ping every 4 min to prevent sleep\n"
+        f"Use /autostop to stop"
+    )
 
 async def autostop(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    global AUTOPILOT_ACTIVE
+    global AUTOPILOT_ACTIVE, AUTOPILOT_TASK
     AUTOPILOT_ACTIVE=False
+    if AUTOPILOT_TASK and not AUTOPILOT_TASK.done():
+        AUTOPILOT_TASK.cancel()
     SUBSCRIBERS.discard(update.effective_chat.id)
-    await update.message.reply_text("🛑 AUTOPILOT OFF")
+    await update.message.reply_text("🛑 AUTOPILOT OFF - Keep-awake still running for bot")
 
 async def autopilot_loop(context:ContextTypes.DEFAULT_TYPE):
     global AUTOPILOT_ACTIVE
+    print("Autopilot loop started with keep-awake")
     while AUTOPILOT_ACTIVE:
-        await asyncio.sleep(15*60)
-        if not AUTOPILOT_ACTIVE: break
         try:
-            msg,direction,_,count,_,_,_,_=build_s1s6()
+            # Sleep 15 min but check every 60 sec to stay responsive and keep alive
+            for i in range(15):
+                if not AUTOPILOT_ACTIVE:
+                    break
+                await asyncio.sleep(60)  # 1 min chunks
+                # Every 4 min, ping handled by keep_awake_trick thread, but also log here
+                if i % 4 == 0:
+                    print(f"Autopilot heartbeat {datetime.now()} - Active, subscribers {len(SUBSCRIBERS)}")
+            
+            if not AUTOPILOT_ACTIVE:
+                break
+                
+            msg,direction,_,_,_,_,_,_=build_s1s6()
             if "2 agree" in msg and "WAIT" not in direction:
+                print(f"AUTOPILOT ALERT: {direction} - Sending to {len(SUBSCRIBERS)} subscribers + channel")
                 for chat_id in list(SUBSCRIBERS):
-                    try: await context.bot.send_message(chat_id=chat_id,text=f"🤖 S1+S6 AUTOPILOT\n{msg}")
-                    except: pass
-                try: await context.bot.send_message(chat_id=CHANNEL_ID,text=msg)
-                except: pass
-        except Exception as e: print(f"Autopilot error: {e}")
+                    try:
+                        await context.bot.send_message(chat_id=chat_id,text=f"🤖 S1+S6 AUTOPILOT\n{msg}")
+                    except Exception as e:
+                        print(f"Failed send to {chat_id}: {e}")
+                try:
+                    await context.bot.send_message(chat_id=CHANNEL_ID,text=msg)
+                except Exception as e:
+                    print(f"Failed send to channel: {e}")
+            else:
+                print(f"Autopilot check: No 2-agree trade - {msg[:50]}")
+                
+        except asyncio.CancelledError:
+            print("Autopilot cancelled")
+            break
+        except Exception as e:
+            print(f"Autopilot error: {e}")
+            await asyncio.sleep(60)
 
 async def setchannel(update:Update,context:ContextTypes.DEFAULT_TYPE):
     global CHANNEL_ID
@@ -181,8 +261,8 @@ async def setchannel(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
 async def channeltest(update:Update,context:ContextTypes.DEFAULT_TYPE):
     try:
-        await context.bot.send_message(chat_id=CHANNEL_ID,text="✅ S1+S6 BEST COMBO 63.5% Test - Connected!")
-        await update.message.reply_text("✅ Test sent!")
+        await context.bot.send_message(chat_id=CHANNEL_ID,text="✅ S1+S6 BEST COMBO 63.5% Test - Connected! Keep-awake ON")
+        await update.message.reply_text("✅ Test sent! Keep-awake trick active")
     except Exception as e:
         await update.message.reply_text(f"❌ Failed: {e}")
 
@@ -204,7 +284,7 @@ def main():
     app.add_handler(CommandHandler("autostop",autostop))
     app.add_handler(CommandHandler("setchannel",setchannel))
     app.add_handler(CommandHandler("channeltest",channeltest))
-    print("S1+S6 BEST COMBO 63.5% LIVE - ONLY S1+S6 NO ATTACHMENTS")
+    print("S1+S6 BEST COMBO 63.5% LIVE - KEEP-AWAKE TRICK ON - ONLY S1+S6")
     app.run_polling(drop_pending_updates=True)
 
 if __name__=="__main__": main()
