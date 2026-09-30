@@ -197,12 +197,10 @@ async def buy(update:Update,context:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"💳 JOIN VIP $25/MONTH\n"
         f"USDT TRC20:\n{CRYPTO_WALLET}\n\n"
-        f"After payment, send TXID to:\n"
-        f"👤 Admin: @Onyebest\n"
-        f"📢 Channel: @GoldVIPSignalsOnyebest\n"
+        f"After payment, send TXID to channel:\n"
+        f"📢 {CHANNEL_USERNAME}\n"
         f"🔗 https://t.me/GoldVIPSignalsOnyebest\n\n"
-        f"✅ S1+S6 BEST COMBO 63.5% - Only S1+S6 agree = 85% HIGH CONFIDENCE\n"
-        f"💬 Contact @Onyebest to join VIP",
+        f"85% HIGH CONFIDENCE",
         disable_web_page_preview=True
     )
 
@@ -300,7 +298,7 @@ async def channeltest(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
 async def sendvip(update:Update,context:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id!=ADMIN_ID:
-        await update.message.reply_text("❌ Admin only - Onyebest only")
+        await update.message.reply_text("❌ Admin only")
         return
     full_msg, vip_msg, direction,_,_,price,_,_,_ = build_s1s6()
     if vip_msg and direction not in ["WAIT","CONFLICT"]:
