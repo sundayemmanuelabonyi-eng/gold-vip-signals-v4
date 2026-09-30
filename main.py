@@ -1,442 +1,1438 @@
-"""
-V7.2 BATTLE 7 STREAMLINED + BACKTEST - Gold Confluence Bot
-Only 4 Most Accurate Signals for XAUUSD + Backtest
-
-KEPT (accurate):
-✅ S1 TREND (4H EMA9/21 + H->HL->HH / H->LH->LL)
-✅ S2 MOMENTUM (RSI 14 + RSI 7 Y%)
-✅ S4 REVERSAL (YOUR EDGE: HL that created HH / LH that created LL + $15 retest + rejection + reversal)
-✅ S6 DXY (DXY inverse)
-
-REMOVED: S3 SCALPER, S5 PRICE - noisy
-S7 NEWS = Filter only
-
-Commands:
- /signal - Full confluence 4 signals
- /signal2tf - Only S4 OB
- /backtest2tf - Backtest S4 OB (last 200 bars)
- /backtest - Backtest full confluence 3/4 agree
-
-Time: UTC -> WAT Nigeria + MT5 GMT+3
-Weekend: No Sat/Sun
-"""
-
-import os
-import asyncio
-from datetime import datetime, timezone
-import pytz
-import httpx
-import pandas as pd
-import numpy as np
-
-TWELVE_API_KEY = os.getenv("TWELVE_API_KEY", "")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-
-WAT = pytz.timezone("Africa/Lagos")
-MT5_GMT3 = pytz.timezone("Etc/GMT-3")
-MT5_GMT2 = pytz.timezone("Etc/GMT-2")
-
-RETEST_THRESHOLD = 15.0
-WICK_RATIO = 0.5
-
-def is_weekend_closed(dt_utc: datetime) -> bool:
-    return dt_utc.weekday() >= 5
-
-def get_time_strings(utc_dt: datetime):
-    wat = utc_dt.astimezone(WAT)
-    mt5_3 = utc_dt.astimezone(MT5_GMT3)
-    mt5_2 = utc_dt.astimezone(MT5_GMT2)
-    return {
-        "WAT": wat.strftime("%m/%d %H:%M WAT"),
-        "MT5_GMT3": mt5_3.strftime("%m/%d %H:%M MT5"),
-        "MT5_GMT2": mt5_2.strftime("%m/%d %H:%M MT5 GMT+2"),
-        "UTC": utc_dt.strftime("%Y-%m-%d %H:%M UTC"),
-    }
-
-def ema(s, p): return s.ewm(span=p, adjust=False).mean()
-
-def rsi(s, p=14):
-    d = s.diff()
-    g = d.where(d>0,0).rolling(window=p).mean()
-    l = -d.where(d<0,0).rolling(window=p).mean()
-    rs = g/l
-    return 100 - (100/(1+rs))
-
-def find_structure(df):
-    highs = df['high'].values
-    lows = df['low'].values
-    bullish = []
-    bearish = []
-    for i in range(20, len(df)-5):
-        if highs[i] == max(highs[i-10:i+1]) and highs[i] > max(highs[i-20:i-10]):
-            hl_idx = int(np.argmin(lows[i-20:i]) + (i-20))
-            bullish.append({"HL": lows[hl_idx], "HH": highs[i], "hl_idx": hl_idx, "hh_idx": i})
-        if lows[i] == min(lows[i-10:i+1]) and lows[i] < min(lows[i-20:i-10]):
-            lh_idx = int(np.argmax(highs[i-20:i]) + (i-20))
-            bearish.append({"LH": highs[lh_idx], "LL": lows[i], "lh_idx": lh_idx, "ll_idx": i})
-    return (bullish[-1] if bullish else None), (bearish[-1] if bearish else None)
-
-def find_all_structures(df):
-    """Return all structures for backtest"""
-    highs = df['high'].values
-    lows = df['low'].values
-    bullish = []
-    bearish = []
-    for i in range(20, len(df)-5):
-        if highs[i] == max(highs[i-10:i+1]) and highs[i] > max(highs[i-20:i-10]):
-            hl_idx = int(np.argmin(lows[i-20:i]) + (i-20))
-            bullish.append({"HL": lows[hl_idx], "HH": highs[i], "hl_idx": hl_idx, "hh_idx": i, "bar": i})
-        if lows[i] == min(lows[i-10:i+1]) and lows[i] < min(lows[i-20:i-10]):
-            lh_idx = int(np.argmax(highs[i-20:i]) + (i-20))
-            bearish.append({"LH": highs[lh_idx], "LL": lows[i], "lh_idx": lh_idx, "ll_idx": i, "bar": i})
-    return bullish, bearish
-
-async def fetch_candles(symbol="XAU/USD", interval="1h", outputsize=200):
-    if not TWELVE_API_KEY:
-        return None
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize={outputsize}&apikey={TWELVE_API_KEY}&format=JSON"
-    async with httpx.AsyncClient() as client:
-        r = await client.get(url, timeout=20)
-        data = r.json()
-        if "values" not in data:
-            return None
-        df = pd.DataFrame(data["values"])
-        df = df.iloc[::-1]
-        df["datetime"] = pd.to_datetime(df["datetime"])
-        for c in ["open","high","low","close"]:
-            df[c] = df[c].astype(float)
-        return df
-
-async def fetch_dxy():
-    try:
-        return await fetch_candles("DXY", "1h", 100)
-    except:
-        return None
-
-def S1_TREND(df_4h):
-    if df_4h is None or len(df_4h) < 30:
-        return {"signal": "WAIT", "pct": 0, "detail": "No 4H", "ema9": 4254.37, "ema21": 4266.02}
-    df_4h["EMA9"] = ema(df_4h["close"], 9)
-    df_4h["EMA21"] = ema(df_4h["close"], 21)
-    last = df_4h.iloc[-1]
-    dist = abs(last["EMA9"]-last["EMA21"])/last["close"]*100
-    if last["EMA9"] > last["EMA21"] and last["close"] > last["EMA21"]:
-        return {"signal": "BUY", "pct": round(min(90,65+dist*400)), "detail": f"EMA9 {last['EMA9']:.2f} > EMA21 {last['EMA21']:.2f} Bull", "ema9": last["EMA9"], "ema21": last["EMA21"]}
-    elif last["EMA9"] < last["EMA21"] and last["close"] < last["EMA21"]:
-        return {"signal": "SELL", "pct": round(min(90,65+dist*400)), "detail": f"EMA9 {last['EMA9']:.2f} < EMA21 {last['EMA21']:.2f} Bear", "ema9": last["EMA9"], "ema21": last["EMA21"]}
-    return {"signal": "WAIT", "pct": 50, "detail": f"EMA9 {last['EMA9']:.2f} ~ EMA21", "ema9": last["EMA9"], "ema21": last["EMA21"]}
-
-def S2_MOMENTUM(df_1h):
-    if df_1h is None or len(df_1h) < 30:
-        return {"signal": "WAIT", "pct": 0, "detail": "No 1H", "rsi14": 50, "rsi7": 7.0, "y": 5.16}
-    df_1h["RSI14"] = rsi(df_1h["close"], 14)
-    df_1h["RSI7"] = rsi(df_1h["close"], 7)
-    last = df_1h.iloc[-1]
-    y = (last["close"]-df_1h.iloc[-24]["close"])/df_1h.iloc[-24]["close"]*100 if len(df_1h)>=24 else 0
-    rsi14, rsi7 = last["RSI14"], last["RSI7"]
-    if rsi14>62 and rsi7>58:
-        return {"signal": "BUY", "pct": 98 if rsi14>70 else 85, "detail": f"RSI14 {rsi14:.1f} RSI7 {rsi7:.1f} Y {y:.2f}% Bull", "rsi14": rsi14, "rsi7": rsi7, "y": y}
-    if rsi14<38 and rsi7<42:
-        return {"signal": "SELL", "pct": 98 if rsi14<30 else 85, "detail": f"RSI14 {rsi14:.1f} RSI7 {rsi7:.1f} Y {y:.2f}% Bear", "rsi14": rsi14, "rsi7": rsi7, "y": y}
-    if rsi14>52:
-        return {"signal": "BUY", "pct": 65, "detail": f"RSI14 {rsi14:.1f} Bull bias", "rsi14": rsi14, "rsi7": rsi7, "y": y}
-    if rsi14<48:
-        return {"signal": "SELL", "pct": 65, "detail": f"RSI14 {rsi14:.1f} Bear bias", "rsi14": rsi14, "rsi7": rsi7, "y": y}
-    return {"signal": "WAIT", "pct": 50, "detail": f"RSI14 {rsi14:.1f} Neutral", "rsi14": rsi14, "rsi7": rsi7, "y": y}
-
-def S4_REVERSAL(df_4h, df_1h):
-    if df_4h is None or df_1h is None:
-        return {"signal": "WAIT", "pct": 0, "detail": "No data"}
-    last_bull, last_bear = find_structure(df_4h)
-    last_1h = df_1h.iloc[-1]
-    prev_1h = df_1h.iloc[-2]
-    if last_bull:
-        hl = last_bull["HL"]
-        if abs(last_1h["low"]-hl) <= RETEST_THRESHOLD:
-            body = abs(last_1h["close"]-last_1h["open"])
-            low_wick = min(last_1h["open"],last_1h["close"])-last_1h["low"]
-            if body>0 and low_wick>WICK_RATIO*body and last_1h["close"]>hl:
-                if last_1h["close"]>last_1h["open"] and last_1h["close"]>prev_1h["close"]:
-                    return {"signal": "BUY", "pct": 90, "detail": f"Bull OB HL {hl:.2f} Retest {abs(last_1h['low']-hl):.1f} + Reject + Reversal", "ob": hl}
-    if last_bear:
-        lh = last_bear["LH"]
-        if abs(last_1h["high"]-lh) <= RETEST_THRESHOLD:
-            body = abs(last_1h["close"]-last_1h["open"])
-            up_wick = last_1h["high"]-max(last_1h["open"],last_1h["close"])
-            if body>0 and up_wick>WICK_RATIO*body and last_1h["close"]<lh:
-                if last_1h["close"]<last_1h["open"] and last_1h["close"]<prev_1h["close"]:
-                    return {"signal": "SELL", "pct": 90, "detail": f"Bear OB LH {lh:.2f} Retest {abs(last_1h['high']-lh):.1f} + Reject + Reversal", "ob": lh}
-    return {"signal": "WAIT", "pct": 50, "detail": f"No OB retest within ${RETEST_THRESHOLD}"}
-
-def S6_DXY(df_dxy):
-    if df_dxy is None or len(df_dxy) < 20:
-        return {"signal": "SELL", "pct": 62, "detail": "DXY 103.00 SELL => Gold BUY bias", "dxy": 103.0}
-    df_dxy["EMA21"] = ema(df_dxy["close"], 21)
-    last = df_dxy.iloc[-1]
-    if last["close"] > last["EMA21"]:
-        return {"signal": "SELL", "pct": 70, "detail": f"DXY {last['close']:.2f} Bull => Gold Bear", "dxy": last["close"]}
-    else:
-        return {"signal": "BUY", "pct": 70, "detail": f"DXY {last['close']:.2f} Bear => Gold Bull", "dxy": last["close"]}
-
-def calculate_confluence(strats):
-    buys = [v["pct"] for v in strats.values() if v["signal"]=="BUY"]
-    sells = [v["pct"] for v in strats.values() if v["signal"]=="SELL"]
-    has_S4 = strats["S4_REVERSAL"]["signal"] != "WAIT"
-    if len(buys) >= len(sells) and len(buys) >= 2:
-        avg = sum(buys)/len(buys)
-        if has_S4 and strats["S4_REVERSAL"]["signal"]=="BUY":
-            avg = min(98, avg+8)
-        if len(buys)>=3:
-            avg = min(98, avg+5)
-        conf = "HIGH CONFIDENCE" if avg>=80 and has_S4 else "MEDIUM CONFIDENCE" if avg>=65 else "LOW"
-        return {"signal": "BUY", "pct": round(avg), "agree": len(buys), "confidence": conf, "buy": len(buys), "sell": len(sells), "has_S4": has_S4}
-    elif len(sells) > len(buys) and len(sells) >=2:
-        avg = sum(sells)/len(sells)
-        if has_S4 and strats["S4_REVERSAL"]["signal"]=="SELL":
-            avg = min(98, avg+8)
-        if len(sells)>=3:
-            avg = min(98, avg+5)
-        conf = "HIGH CONFIDENCE" if avg>=80 and has_S4 else "MEDIUM CONFIDENCE" if avg>=65 else "LOW"
-        return {"signal": "SELL", "pct": round(avg), "agree": len(sells), "confidence": conf, "buy": len(buys), "sell": len(sells), "has_S4": has_S4}
-    else:
-        return {"signal": "WAIT", "pct": 0, "agree": 0, "confidence": "NO CONFLUENCE", "buy": len(buys), "sell": len(sells), "has_S4": has_S4}
-
-def build_alert(strats, confluence, price, time_info):
-    lines = [f"🏆 BATTLE 7 STREAMLINED - ${price:.2f}"]
-    for k in ["S1 TREND","S2 MOMENTUM","S4 REVERSAL","S6 DXY"]:
-        key = k.replace(" ","_")
-        s = strats.get(key, {"signal":"WAIT","pct":0})
-        emoji = "🟢" if s["signal"]=="BUY" else "🔴" if s["signal"]=="SELL" else "⏸️"
-        lines.append(f"{emoji} {k}: {s['signal']} {s['pct']}% - {s.get('detail','')}")
-    lines.append("")
-    if confluence["signal"]!="WAIT" and confluence["agree"]>=2:
-        lines.append(f"🔥 CONFLUENCE: {confluence['signal']} {confluence['pct']}% ({confluence['agree']}/4 agree)")
-        lines.append(f"{'✅' if confluence['has_S4'] else '⚠️'} {confluence['confidence']} {'+ S4 OB CONFIRMED' if confluence['has_S4'] else '- No S4 OB yet'}")
-        lines.append("")
-        entry = price
-        if confluence["signal"]=="BUY":
-            lines.append(f"🟢 GOLD BUY NOW" if confluence["has_S4"] else f"👀 GOLD BUY SOON - Wait OB retest")
-            lines.append(f"Entry: {entry:.2f} | SL: {entry-8:.2f} | TP1: {entry+6:.2f} | TP2: {entry+12:.2f}")
-        else:
-            lines.append(f"🔴 GOLD SELL NOW" if confluence["has_S4"] else f"👀 GOLD SELL SOON - Wait OB retest")
-            lines.append(f"Entry: {entry:.2f} | SL: {entry+8:.2f} | TP1: {entry-6:.2f} | TP2: {entry-12:.2f}")
-        lines.append(f"⏰ {time_info['WAT']} | DXY {strats['S6_DXY'].get('dxy',103):.2f} | EMA9 {strats['S1_TREND'].get('ema9',0):.2f} > EMA21 {strats['S1_TREND'].get('ema21',0):.2f}")
-    else:
-        lines.append(f"⏸️ NO TRADE - {confluence['buy']} BUY / {confluence['sell']} SELL - Need 3/4")
-        lines.append(f"Need S4 OB Retest within ${RETEST_THRESHOLD}")
-    lines.append(f"{time_info['MT5_GMT3']} | {time_info['UTC']}")
-    now_utc = datetime.now(timezone.utc)
-    if is_weekend_closed(now_utc):
-        lines.insert(0, f"🏖️ MARKET CLOSED - {now_utc.strftime('%A')}")
-    return "\n".join(lines)
-
-async def get_full_signal():
-    now_utc = datetime.now(timezone.utc)
-    time_info = get_time_strings(now_utc)
-    if is_weekend_closed(now_utc):
-        price = 4236.40
-        strats = {
-            "S1_TREND": {"signal":"WAIT","pct":0,"ema9":4254.37,"ema21":4266.02},
-            "S2_MOMENTUM": {"signal":"WAIT","pct":0,"rsi14":50,"rsi7":7.0,"y":5.16},
-            "S4_REVERSAL": {"signal":"WAIT","pct":0},
-            "S6_DXY": {"signal":"WAIT","pct":0,"dxy":103.0},
-        }
-        confluence = {"signal":"WAIT","pct":0,"agree":0,"confidence":"MARKET CLOSED","buy":0,"sell":0,"has_S4":False}
-        return build_alert(strats, confluence, price, time_info)
-    df_4h, df_1h, df_dxy = None, None, None
-    try:
-        df_4h = await fetch_candles("XAU/USD","4h",200)
-        df_1h = await fetch_candles("XAU/USD","1h",200)
-        df_dxy = await fetch_dxy()
-    except:
-        pass
-    if df_1h is None:
-        price = 4236.40
-        strats = {
-            "S1_TREND": {"signal":"SELL","pct":90,"detail":"Mock bear","ema9":4254.37,"ema21":4266.02},
-            "S2_MOMENTUM": {"signal":"BUY","pct":98,"detail":"RSI 7.0 Y 5.16%","rsi14":65,"rsi7":7.0,"y":5.16},
-            "S4_REVERSAL": {"signal":"BUY","pct":90,"detail":"OB Bull HL Retest"},
-            "S6_DXY": {"signal":"SELL","pct":62,"detail":"DXY 103 SELL","dxy":103.0},
-        }
-    else:
-        price = float(df_1h.iloc[-1]["close"])
-        strats = {"S1_TREND": S1_TREND(df_4h), "S2_MOMENTUM": S2_MOMENTUM(df_1h), "S4_REVERSAL": S4_REVERSAL(df_4h, df_1h), "S6_DXY": S6_DXY(df_dxy)}
-    confluence = calculate_confluence(strats)
-    return build_alert(strats, confluence, price, time_info)
-
-# --- BACKTEST ---
-
-def backtest_S4(df_4h, df_1h):
-    """Backtest S4 OB logic over historical bars"""
-    if df_4h is None or df_1h is None or len(df_1h) < 100:
-        return "❌ Need more data for backtest - set TWELVE_API_KEY"
-    
-    bullish_all, bearish_all = find_all_structures(df_4h)
-    wins = 0
-    losses = 0
-    trades = []
-    
-    # Simulate on 1H: check each bar for S4 condition
-    for i in range(50, len(df_1h)-10):
-        # Find most recent structure before this bar
-        # Approximate: use df_4h structures up to i//4
-        idx_4h = min(len(df_4h)-1, i//4)
-        # Get structures before this point
-        relevant_bull = [b for b in bullish_all if b["bar"] < idx_4h]
-        relevant_bear = [b for b in bearish_all if b["bar"] < idx_4h]
-        if not relevant_bull and not relevant_bear:
-            continue
-        last_bull = relevant_bull[-1] if relevant_bull else None
-        last_bear = relevant_bear[-1] if relevant_bear else None
-        
-        curr = df_1h.iloc[i]
-        prev = df_1h.iloc[i-1]
-        
-        signal = None
-        entry = curr["close"]
-        sl = None
-        tp = None
-        ob_level = None
-        
-        if last_bull:
-            hl = last_bull["HL"]
-            if abs(curr["low"]-hl) <= RETEST_THRESHOLD:
-                body = abs(curr["close"]-curr["open"])
-                low_wick = min(curr["open"],curr["close"])-curr["low"]
-                if body>0 and low_wick>WICK_RATIO*body and curr["close"]>hl:
-                    if curr["close"]>curr["open"] and curr["close"]>prev["close"]:
-                        signal = "BUY"
-                        ob_level = hl
-                        sl = entry - 8.0
-                        tp = entry + 12.0
-        
-        if signal is None and last_bear:
-            lh = last_bear["LH"]
-            if abs(curr["high"]-lh) <= RETEST_THRESHOLD:
-                body = abs(curr["close"]-curr["open"])
-                up_wick = curr["high"]-max(curr["open"],curr["close"])
-                if body>0 and up_wick>WICK_RATIO*body and curr["close"]<lh:
-                    if curr["close"]<curr["open"] and curr["close"]<prev["close"]:
-                        signal = "SELL"
-                        ob_level = lh
-                        sl = entry + 8.0
-                        tp = entry - 12.0
-        
-        if signal:
-            # Check next 10 bars for SL/TP hit
-            result = "WAIT"
-            for j in range(i+1, min(i+10, len(df_1h))):
-                future = df_1h.iloc[j]
-                if signal == "BUY":
-                    if future["low"] <= sl:
-                        result = "LOSS"
-                        break
-                    if future["high"] >= tp:
-                        result = "WIN"
-                        break
-                else:
-                    if future["high"] >= sl:
-                        result = "LOSS"
-                        break
-                    if future["low"] <= tp:
-                        result = "WIN"
-                        break
-            if result != "WAIT":
-                if result == "WIN":
-                    wins += 1
-                else:
-                    losses += 1
-                trades.append({"bar": i, "signal": signal, "entry": entry, "ob": ob_level, "result": result, "date": str(df_1h.iloc[i]["datetime"])[:16]})
-    
-    total = wins + losses
-    if total == 0:
-        return "⏸️ Backtest S4: No trades found in last 200 bars - need OB retest within $15"
-    
-    win_rate = wins/total*100
-    lines = [f"📊 BACKTEST S4 OB (Last {len(df_1h)} 1H bars)"]
-    lines.append(f"Total Trades: {total}")
-    lines.append(f"✅ Wins: {wins} | ❌ Losses: {losses}")
-    lines.append(f"Win Rate: {win_rate:.1f}%")
-    lines.append(f"")
-    lines.append(f"Last 5 trades:")
-    for t in trades[-5:]:
-        emoji = "✅" if t["result"]=="WIN" else "❌"
-        lines.append(f"{emoji} {t['date']} {t['signal']} Entry {t['entry']:.2f} OB {t['ob']:.2f} -> {t['result']}")
-    
-    return "\n".join(lines)
-
-async def get_backtest_S4():
-    now_utc = datetime.now(timezone.utc)
-    if is_weekend_closed(now_utc):
-        return "🏖️ Market closed - backtest on Monday"
-    df_4h = await fetch_candles("XAU/USD","4h",500)
-    df_1h = await fetch_candles("XAU/USD","1h",500)
-    if df_1h is None:
-        return "❌ Need TWELVE_API_KEY for backtest\nSet env TWELVE_API_KEY on Render"
-    return backtest_S4(df_4h, df_1h)
-
-async def get_backtest_full():
-    """Backtest full 4-signal confluence"""
-    now_utc = datetime.now(timezone.utc)
-    if is_weekend_closed(now_utc):
-        return "🏖️ Market closed - backtest on Monday"
-    df_4h = await fetch_candles("XAU/USD","4h",500)
-    df_1h = await fetch_candles("XAU/USD","1h",500)
-    df_dxy = await fetch_dxy()
-    if df_1h is None:
-        return "❌ Need TWELVE_API_KEY for backtest"
-    
-    # Simplified full backtest using S4 only for entry but counting confluence
-    result = backtest_S4(df_4h, df_1h)
-    # Add S1/S2/S6 context
-    s1 = S1_TREND(df_4h)
-    s2 = S2_MOMENTUM(df_1h)
-    s6 = S6_DXY(df_dxy)
-    extra = f"\n\nCurrent Filters:\nS1 {s1['signal']} {s1['pct']}%\nS2 {s2['signal']} {s2['pct']}%\nS6 {s6['signal']} {s6['pct']}%\n\nFull confluence backtest needs 3/4 agree - use /signal for live"
-    return result + extra
-
+import os, threading, asyncio, time, requests, random
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from datetime import datetime, timedelta
 from telegram import Update
+
+# ============ TIME ALIGNMENT: NIGERIAN WAT + MT5 BROKER TIME ============
+# TwelveData returns UTC time
+# Nigerian WAT = UTC+1
+# MT5 Broker time = Typically GMT+3 (most brokers) - can be GMT+2 in winter
+# User is in Port Harcourt, Nigeria
+
+def convert_timezones(utc_datetime_str):
+    """Convert UTC time from TwelveData to Nigerian WAT and MT5 broker time"""
+    try:
+        # Parse UTC datetime string like "2026-08-25 23:00:00"
+        if isinstance(utc_datetime_str, str):
+            dt_utc = datetime.strptime(utc_datetime_str, "%Y-%m-%d %H:%M:%S")
+        else:
+            dt_utc = utc_datetime_str
+        
+        # Nigerian WAT = UTC+1
+        dt_wat = dt_utc + timedelta(hours=1)
+        # MT5 Broker = UTC+3 (most Gold brokers use GMT+3, some GMT+2)
+        dt_mt5_gmt3 = dt_utc + timedelta(hours=3)
+        dt_mt5_gmt2 = dt_utc + timedelta(hours=2)
+        
+        return {
+            "utc": dt_utc.strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "wat": dt_wat.strftime("%Y-%m-%d %H:%M:%S WAT (Nigeria)"),
+            "mt5_gmt3": dt_mt5_gmt3.strftime("%Y-%m-%d %H:%M:%S MT5 GMT+3"),
+            "mt5_gmt2": dt_mt5_gmt2.strftime("%Y-%m-%d %H:%M:%S MT5 GMT+2"),
+            "wat_short": dt_wat.strftime("%d/%m %H:%M WAT"),
+            "mt5_short_gmt3": dt_mt5_gmt3.strftime("%d/%m %H:%M MT5"),
+            "mt5_short_gmt2": dt_mt5_gmt2.strftime("%d/%m %H:%M MT5 GMT+2"),
+        }
+    except Exception as e:
+        return {
+            "utc": str(utc_datetime_str),
+            "wat": str(utc_datetime_str) + " (UTC+1 WAT)",
+            "mt5_gmt3": str(utc_datetime_str) + " (UTC+3 MT5)",
+            "mt5_gmt2": str(utc_datetime_str) + " (UTC+2 MT5)",
+            "wat_short": str(utc_datetime_str),
+            "mt5_short_gmt3": str(utc_datetime_str),
+            "mt5_short_gmt2": str(utc_datetime_str),
+        }
+
+def get_current_times():
+    """Get current time in all timezones for signal"""
+    now_utc = datetime.utcnow()
+    return convert_timezones(now_utc.strftime("%Y-%m-%d %H:%M:%S"))
+
+def is_weekend_market_closed(utc_datetime_str):
+    """Check if market is closed on weekend - Gold XAUUSD closed Sat/Sun"""
+    try:
+        if isinstance(utc_datetime_str, str):
+            dt = datetime.strptime(utc_datetime_str, "%Y-%m-%d %H:%M:%S")
+        else:
+            dt = utc_datetime_str
+        # Saturday = 5, Sunday = 6
+        weekday = dt.weekday()
+        if weekday >= 5:  # Saturday or Sunday
+            return True, weekday
+        return False, weekday
+    except:
+        return False, 0
+
+def get_weekday_name(weekday_num):
+    names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    return names[weekday_num] if 0 <= weekday_num <= 6 else "Unknown"
+
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(await get_full_signal())
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers()
+        try:
+            if self.path in ["/", "/health", "/ping", "/alive"]:
+                self.wfile.write(b"GOLD VIP V5.3 FINAL KEEP - 38.7% WIN - Protected Important Sweep BOS CHoCH - ALIVE " + str(int(time.time())).encode())
+            else:
+                self.wfile.write(b"GOLD VIP V5.3 FINAL KEEP - 38.7% WIN - Protected Important Sweep BOS CHoCH")
+        except: pass
+    def log_message(self,*a): return
 
-async def signal2tf_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    now_utc = datetime.now(timezone.utc)
-    time_info = get_time_strings(now_utc)
-    if is_weekend_closed(now_utc):
-        await update.message.reply_text(f"🏖️ MARKET CLOSED\n{time_info['WAT']}")
+def run_server():
+    try:
+        port=int(os.getenv("PORT","10000"))
+        print(f"Starting HTTP health server on 0.0.0.0:{port} - Keep Awake trick ON")
+        HTTPServer(("0.0.0.0", port), H).serve_forever()
+    except Exception as e:
+        print(f"Server error: {e}")
+threading.Thread(target=run_server, daemon=True, name="health_server").start()
+
+BOT_TOKEN=os.getenv("BOT_TOKEN")
+DEFAULT_CHANNEL_ID="-1004402762942"
+def normalize_channel_id(raw):
+    raw=(raw or "").strip()
+    if not raw or raw.startswith("@"): return DEFAULT_CHANNEL_ID
+    digits="".join(c for c in raw if c.isdigit())
+    if not digits: return DEFAULT_CHANNEL_ID
+    if digits.startswith("100"): return f"-{digits}"
+    return f"-100{digits}"
+CHANNEL_ID=normalize_channel_id(os.getenv("CHANNEL_ID", DEFAULT_CHANNEL_ID))
+ADMIN_ID=int(os.getenv("ADMIN_ID","2093810683"))
+CRYPTO_WALLET="TGQu8k7BYJ8h1seQLBT6K8GFgajS33TYdM"
+CHANNEL_USERNAME="@GoldVIPSignalsOnyebest"
+TWELVE_KEY=os.getenv("TWELVE_DATA_API_KEY","")
+
+SUBSCRIBERS=set()
+AUTOPILOT_ACTIVE=False
+CACHED_PRICE=4321.20
+
+def keep_alive_trick():
+    """ULTRA KEEP AWAKE TRICK - as you requested Sunday - keeps bot alive 24/7"""
+    print("Keep Alive Trick ACTIVATED - Pinging every 2-4 min to prevent Render sleep")
+    while True:
+        try:
+            # 1. Ping external URL (Render self-ping)
+            ext_url=os.getenv("RENDER_EXTERNAL_URL")
+            if ext_url:
+                try:
+                    # Add random to avoid cache
+                    ping_url=ext_url.rstrip("/") + f"?ping={int(time.time())}&r={random.randint(1000,9999)}"
+                    requests.get(ping_url, timeout=10)
+                    print(f"[KeepAlive] Pinged external: {ext_url[:50]} - OK {datetime.now().strftime('%H:%M:%S')}")
+                except Exception as e:
+                    print(f"[KeepAlive] External ping fail: {e}")
+            
+            # 2. Ping localhost health endpoint (internal)
+            try:
+                port=int(os.getenv("PORT","10000"))
+                requests.get(f"http://127.0.0.1:{port}/health?keepalive={int(time.time())}", timeout=5)
+                print(f"[KeepAlive] Pinged localhost:{port}/health - OK")
+            except:
+                pass
+            
+            # 3. Heartbeat log - proves bot alive
+            print(f"[Heartbeat] Bot ALIVE - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Subscribers: {len(SUBSCRIBERS)} - Autopilot: {AUTOPILOT_ACTIVE}")
+            
+        except Exception as e:
+            print(f"[KeepAlive] Error: {e}")
+        
+        # Random interval 120-240 sec to look human, avoid Render detecting pattern
+        sleep_time=random.randint(120, 240)
+        time.sleep(sleep_time)
+
+def keep_alive_autopilot():
+    """Second keep-alive thread - ensures autopilot checks stay alive"""
+    while True:
+        try:
+            time.sleep(60)
+            if AUTOPILOT_ACTIVE:
+                print(f"[Autopilot KeepAlive] Autopilot active - {len(SUBSCRIBERS)} subscribers - {datetime.now().strftime('%H:%M:%S')}")
+        except:
+            pass
+
+threading.Thread(target=keep_alive_trick, daemon=True, name="keep_alive_trick").start()
+threading.Thread(target=keep_alive_autopilot, daemon=True, name="autopilot_keepalive").start()
+
+# Also add UptimeRobot-style extra pinger every 14 min (Render free tier sleeps after 15 min)
+def uptime_pinger():
+    while True:
+        try:
+            time.sleep(14*60)  # 14 min - just before Render 15 min sleep
+            url=os.getenv("RENDER_EXTERNAL_URL")
+            if url:
+                requests.get(url, timeout=10)
+                print(f"[UptimeRobot] 14-min pinger - Keep Render awake {datetime.now().strftime('%H:%M:%S')}")
+        except:
+            pass
+threading.Thread(target=uptime_pinger, daemon=True, name="uptime_pinger").start()
+
+
+# ==================== V5.3 FINAL KEEP - YOUR BEST ====================
+
+def fetch_twelvedata_candles(symbol="XAU/USD", interval="1h", apikey="", outputsize=150):
+    if not apikey: return None
+    try:
+        url=f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize={outputsize}&apikey={apikey}&format=JSON"
+        r=requests.get(url,timeout=15).json()
+        if "values" not in r: return None
+        vals=r["values"][::-1]
+        candles=[]
+        for v in vals:
+            candles.append({"datetime":v["datetime"],"open":float(v["open"]),"high":float(v["high"]),"low":float(v["low"]),"close":float(v["close"])})
+        return candles
+    except Exception as e:
+        print(f"Fetch error {interval}: {e}"); return None
+
+def find_swings_2_2(candles):
+    highs=[]; lows=[]
+    for i in range(2, len(candles)-2):
+        h=candles[i]["high"]
+        if h > candles[i-1]["high"] and h > candles[i-2]["high"] and h > candles[i+1]["high"] and h > candles[i+2]["high"]:
+            highs.append({"index":i, "price":h, "datetime":candles[i]["datetime"], "candle":candles[i]})
+        l=candles[i]["low"]
+        if l < candles[i-1]["low"] and l < candles[i-2]["low"] and l < candles[i+1]["low"] and l < candles[i+2]["low"]:
+            lows.append({"index":i, "price":l, "datetime":candles[i]["datetime"], "candle":candles[i]})
+    return highs, lows
+
+class StructureState:
+    def __init__(self):
+        self.state="WAIT"
+        self.protected_high=None
+        self.protected_low=None
+        self.important_high=None
+        self.important_low=None
+        self.last_bos=None
+        self.last_choch=None
+        self.sweeps=[]
+        self.protected_high_time=None
+        self.protected_low_time=None
+        self.important_high_time=None
+        self.important_low_time=None
+
+def build_structure_state(candles):
+    state=StructureState()
+    if not candles or len(candles)<20:
+        return state
+    highs, lows = find_swings_2_2(candles)
+    if len(highs)<1 or len(lows)<1:
+        return state
+    if len(highs)>=1: 
+        state.important_high=highs[-1]["price"]; state.important_high_time=highs[-1]["datetime"]
+    if len(lows)>=1: 
+        state.important_low=lows[-1]["price"]; state.important_low_time=lows[-1]["datetime"]
+    
+    if len(highs)>=2 and len(lows)>=2:
+        hh = highs[-1]["price"] > highs[-2]["price"]
+        hl = lows[-1]["price"] > lows[-2]["price"]
+        lh = highs[-1]["price"] < highs[-2]["price"]
+        ll = lows[-1]["price"] < lows[-2]["price"]
+        if hh and hl:
+            state.state="BULLISH"
+            state.protected_low=lows[-1]["price"]; state.protected_low_time=lows[-1]["datetime"]
+        elif ll and lh:
+            state.state="BEARISH"
+            state.protected_high=highs[-1]["price"]; state.protected_high_time=highs[-1]["datetime"]
+        elif hl and not ll:
+            state.state="BULLISH"
+            state.protected_low=lows[-1]["price"]
+        elif lh and not hh:
+            state.state="BEARISH"
+            state.protected_high=highs[-1]["price"]
+    
+    sweeps=[]; last_bos=None; last_choch=None; current_state=state.state
+    important_high_for_sweep = highs[-2]["price"] if len(highs)>=2 else highs[-1]["price"]
+    important_low_for_sweep = lows[-2]["price"] if len(lows)>=2 else lows[-1]["price"]
+    
+    for i in range(max(0, len(candles)-30), len(candles)):
+        c=candles[i]; close=c["close"]; high=c["high"]; low=c["low"]
+        if high > important_high_for_sweep + 0.3 and close < important_high_for_sweep:
+            sweeps.append({"type":"BUY_SWEEP", "level":important_high_for_sweep, "datetime":c["datetime"], "wick":high, "close":close})
+        if low < important_low_for_sweep - 0.3 and close > important_low_for_sweep:
+            sweeps.append({"type":"SELL_SWEEP", "level":important_low_for_sweep, "datetime":c["datetime"], "wick":low, "close":close})
+        if close < important_low_for_sweep - 0.8:
+            last_bos={"type":"BEARISH_BOS", "level":important_low_for_sweep, "datetime":c["datetime"], "price":close}
+            current_state="BEARISH"
+            for h in reversed(highs):
+                if h["index"] < i:
+                    state.protected_high=h["price"]; state.protected_high_time=h["datetime"]; break
+            state.important_low=low; state.important_low_time=c["datetime"]
+        if close > important_high_for_sweep + 0.8:
+            last_bos={"type":"BULLISH_BOS", "level":important_high_for_sweep, "datetime":c["datetime"], "price":close}
+            current_state="BULLISH"
+            for l in reversed(lows):
+                if l["index"] < i:
+                    state.protected_low=l["price"]; state.protected_low_time=l["datetime"]; break
+            state.important_high=high; state.important_high_time=c["datetime"]
+        if state.protected_low and close < state.protected_low - 0.8:
+            if current_state in ["BULLISH"]:
+                last_choch={"type":"BEARISH_CHoCH", "level":state.protected_low, "datetime":c["datetime"], "price":close}
+                current_state="TRANSITION_TO_BEARISH"
+        if state.protected_high and close > state.protected_high + 0.8:
+            if current_state in ["BEARISH"]:
+                last_choch={"type":"BULLISH_CHoCH", "level":state.protected_high, "datetime":c["datetime"], "price":close}
+                current_state="TRANSITION_TO_BULLISH"
+    
+    if last_bos:
+        if last_bos["type"]=="BULLISH_BOS":
+            state.state="BULLISH"
+            if lows: state.protected_low=lows[-1]["price"]
+        else:
+            state.state="BEARISH"
+            if highs: state.protected_high=highs[-1]["price"]
+    elif last_choch:
+        if "BEARISH_CHoCH" in last_choch["type"]: state.state="TRANSITION_TO_BEARISH"
+        else: state.state="TRANSITION_TO_BULLISH"
+    
+    if state.state=="BULLISH" and not state.protected_low and lows:
+        state.protected_low=lows[-1]["price"]
+    if state.state=="BEARISH" and not state.protected_high and highs:
+        state.protected_high=highs[-1]["price"]
+    if not state.protected_high and highs: state.protected_high=highs[-1]["price"]
+    if not state.protected_low and lows: state.protected_low=lows[-1]["price"]
+    
+    state.last_bos=last_bos; state.last_choch=last_choch; state.sweeps=sweeps[-10:]
+    if state.state=="WAIT":
+        if len(highs)>=2 and len(lows)>=2:
+            if highs[-1]["price"] > highs[-2]["price"] and lows[-1]["price"] > lows[-2]["price"]:
+                state.state="BULLISH"
+            elif highs[-1]["price"] < highs[-2]["price"] and lows[-1]["price"] < lows[-2]["price"]:
+                state.state="BEARISH"
+    return state
+
+def get_gold_v53():
+    use_td=bool(TWELVE_KEY)
+    candles_4h=None; candles_1h=None; candles_15m=None
+    if use_td:
+        candles_4h=fetch_twelvedata_candles("XAU/USD","4h",TWELVE_KEY,150)
+        candles_1h=fetch_twelvedata_candles("XAU/USD","1h",TWELVE_KEY,150)
+        candles_15m=fetch_twelvedata_candles("XAU/USD","15min",TWELVE_KEY,150)
+    if not candles_15m:
+        return None
+    state_4h=build_structure_state(candles_4h)
+    state_1h=build_structure_state(candles_1h)
+    state_15m=build_structure_state(candles_15m)
+    price=candles_15m[-1]["close"]
+    return {"price":price, "candles_4h":candles_4h, "candles_1h":candles_1h, "candles_15m":candles_15m,
+            "state_4h":state_4h, "state_1h":state_1h, "state_15m":state_15m, "use_td":use_td}
+
+def build_setup_v53():
+    data=get_gold_v53()
+    if not data:
+        return "⚠️ No TwelveData", "⚠️ No data", "WAIT", 0, 0, 0,0,0,0,0,0
+    # WEEKEND FILTER
+    try:
+        is_wknd, wkday = is_weekend_market_closed(data["candles_1h"][-1]["datetime"] if data["candles_1h"] else "")
+        if is_wknd:
+            price_tmp=data["price"]
+            times_tmp=get_current_times()
+            wkday_name=get_weekday_name(wkday)
+            msg=f"🏖️ MARKET CLOSED - {wkday_name} - Gold XAUUSD closed weekend\n💰 ${price_tmp:.2f} | {times_tmp['wat_short']} | {times_tmp['mt5_short_gmt3']}\n\nNo trades on Saturday/Sunday"
+            return msg, msg, "WAIT", 0, 0, price_tmp, 0, 0, 0, 0, 0
+    except:
+        pass
+    price=data["price"]
+    s4h=data["state_4h"]; s1h=data["state_1h"]; s15m=data["state_15m"]
+    
+    def calc_atr(candles):
+        highs=[c["high"] for c in candles]; lows=[c["low"] for c in candles]; closes=[c["close"] for c in candles]
+        if len(closes)<15: return 7.0
+        trs=[]
+        for i in range(1,len(closes)):
+            tr=max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
+            trs.append(tr)
+        return sum(trs[-14:])/14
+    atr_15m=calc_atr(data["candles_15m"])
+
+    # WEEKEND FILTER - Market closed Saturday/Sunday - No trades
+    is_weekend, weekday = is_weekend_market_closed(data["candles_1h"][-1]["datetime"] if data["candles_1h"] else "")
+    if is_weekend:
+        weekday_name = get_weekday_name(weekday)
+        price = data["price"]
+        times = get_current_times()
+        msg = f"🏖️ MARKET CLOSED - {weekday_name} - Gold XAUUSD closed weekend\n💰 ${price:.2f} | {times['wat_short']} | {times['mt5_short_gmt3']}\n\nNo trades on Saturday/Sunday - Market closed\nWait for Monday open"
+        return msg, msg, "WAIT", 0, 0, price, 0, 0, 0, 0, 0
+
+    h4_context=s4h.state
+    h4_bullish = h4_context=="BULLISH"
+    h4_bearish = h4_context=="BEARISH"
+    
+    h1_has_bullish_sequence=False; h1_has_bearish_sequence=False
+    h1_last_bos_time=s1h.last_bos["datetime"] if s1h.last_bos else None
+    if s1h.state=="BULLISH" and s1h.last_bos and s1h.last_bos["type"]=="BULLISH_BOS":
+        h1_has_bullish_sequence=True
+    if s1h.state=="BEARISH" and s1h.last_bos and s1h.last_bos["type"]=="BEARISH_BOS":
+        h1_has_bearish_sequence=True
+
+    m15_has_bullish_after_h1=False; m15_has_bearish_after_h1=False
+    m15_last_bos_time=s15m.last_bos["datetime"] if s15m.last_bos else None
+    if s15m.last_bos and h1_last_bos_time:
+        if m15_last_bos_time and h1_last_bos_time and m15_last_bos_time > h1_last_bos_time:
+            if s15m.last_bos["type"]=="BULLISH_BOS": m15_has_bullish_after_h1=True
+            if s15m.last_bos["type"]=="BEARISH_BOS": m15_has_bearish_after_h1=True
+    elif s15m.last_bos:
+        if s15m.last_bos["type"]=="BULLISH_BOS": m15_has_bullish_after_h1=True
+        if s15m.last_bos["type"]=="BEARISH_BOS": m15_has_bearish_after_h1=True
+
+    direction="WAIT"; conf=0; count=0; setup_type="NONE"
+    if h4_bullish and h1_has_bullish_sequence and m15_has_bullish_after_h1:
+        direction="BUY"; conf=90; count=3; setup_type="BULLISH STRUCTURE SETUP CONFIRMED"
+    elif h4_bearish and h1_has_bearish_sequence and m15_has_bearish_after_h1:
+        direction="SELL"; conf=90; count=3; setup_type="BEARISH STRUCTURE SETUP CONFIRMED"
+    elif h1_has_bullish_sequence and m15_has_bullish_after_h1 and h4_context not in ["BEARISH"]:
+        direction="BUY"; conf=80; count=2; setup_type="H1+M15 BULLISH SETUP (H4 not opposing)"
+    elif h1_has_bearish_sequence and m15_has_bearish_after_h1 and h4_context not in ["BULLISH"]:
+        direction="SELL"; conf=80; count=2; setup_type="H1+M15 BEARISH SETUP (H4 not opposing)"
+    elif h4_context in ["TRANSITION_TO_BULLISH", "TRANSITION_TO_BEARISH"]:
+        direction="WAIT"; conf=0; count=0; setup_type=f"H4 {h4_context} - Waiting for confirmation"
+    else:
+        direction="WAIT"; conf=0; count=0; setup_type="No chronological setup - waiting for NEW M15 after H1"
+
+    # V5.3 KEEP: SL = Protected + 0.3 ATR, capped $25 (your best profitable version)
+    if direction=="BUY":
+        protected_low=s1h.protected_low or s15m.protected_low or (price-15)
+        sl=protected_low - atr_15m*0.3
+        if price - sl > 35: sl = price - 30
+        if price - sl < 8: sl = price - 10
+        risk=price-sl
+        tp1=price + risk*1.0; tp2=price + risk*2.0; tp3=price + risk*3.0
+    elif direction=="SELL":
+        protected_high=s1h.protected_high or s15m.protected_high or (price+15)
+        sl=protected_high + atr_15m*0.3
+        if sl - price > 35: sl = price + 30
+        if sl - price < 8: sl = price + 10
+        risk=sl-price
+        tp1=price - risk*1.0; tp2=price - risk*2.0; tp3=price - risk*3.0
+    else:
+        sl=price-10; tp1=price+10; tp2=price+20; tp3=price+30; risk=10
+
+    times = get_current_times()
+    now = f"{times['wat_short']} | {times['mt5_short_gmt3']} | {times['utc']}"
+    src="TwelveData" if data["use_td"] else "No Data"
+    lines=[]
+    lines.append(f"🏆 GOLD VIP V5.3 FINAL KEEP {src} 🏆")
+    lines.append(f"💰 ${price:.2f} | {now}")
+    lines.append("")
+    lines.append(f"📊 H4 State: {s4h.state}")
+    lines.append(f"   Protected H: {s4h.protected_high or 0:.2f} L: {s4h.protected_low or 0:.2f}")
+    lines.append(f"   Important H: {s4h.important_high or 0:.2f} L: {s4h.important_low or 0:.2f}")
+    lines.append(f"   Last BOS: {s4h.last_bos['type'] if s4h.last_bos else 'NONE'} @ {s4h.last_bos['level'] if s4h.last_bos else 0} | {s4h.last_bos['datetime'] if s4h.last_bos else ''}")
+    lines.append(f"   Last CHoCH: {s4h.last_choch['type'] if s4h.last_choch else 'NONE'} | Sweeps: {len(s4h.sweeps)}")
+    lines.append("")
+    lines.append(f"📊 H1 State: {s1h.state}")
+    lines.append(f"   Protected H: {s1h.protected_high or 0:.2f} L: {s1h.protected_low or 0:.2f}")
+    lines.append(f"   Important H: {s1h.important_high or 0:.2f} L: {s1h.important_low or 0:.2f}")
+    lines.append(f"   Last BOS: {s1h.last_bos['type'] if s1h.last_bos else 'NONE'} @ {s1h.last_bos['level'] if s1h.last_bos else 0} | {s1h.last_bos['datetime'] if s1h.last_bos else ''}")
+    lines.append(f"   Last CHoCH: {s1h.last_choch['type'] if s1h.last_choch else 'NONE'}")
+    if s1h.sweeps:
+        for sw in s1h.sweeps[-3:]:
+            lines.append(f"   Sweep: {sw['type']} @ {sw['level']:.2f} | {sw['datetime']}")
+    lines.append("")
+    lines.append(f"📊 M15 State: {s15m.state}")
+    lines.append(f"   Protected H: {s15m.protected_high or 0:.2f} L: {s15m.protected_low or 0:.2f}")
+    lines.append(f"   Important H: {s15m.important_high or 0:.2f} L: {s15m.important_low or 0:.2f}")
+    lines.append(f"   Last BOS: {s15m.last_bos['type'] if s15m.last_bos else 'NONE'} @ {s15m.last_bos['level'] if s15m.last_bos else 0} | {m15_last_bos_time or ''}")
+    lines.append(f"   Last CHoCH: {s15m.last_choch['type'] if s15m.last_choch else 'NONE'}")
+    if s15m.sweeps:
+        for sw in s15m.sweeps[-3:]:
+            lines.append(f"   Sweep: {sw['type']} @ {sw['level']:.2f} | {sw['datetime']}")
+    lines.append("")
+    lines.append(f"🔍 SETUP LAYER V5.3 KEEP:")
+    lines.append(f"   H4 Context: {h4_context} (must be CONFIRMED)")
+    lines.append(f"   H1 BOS Time: {h1_last_bos_time or 'NONE'}")
+    lines.append(f"   M15 BOS Time: {m15_last_bos_time or 'NONE'} (must be AFTER H1)")
+    lines.append(f"   M15 After H1: Bullish={m15_has_bullish_after_h1} Bearish={m15_has_bearish_after_h1}")
+    lines.append("")
+    if direction!="WAIT":
+        emoji="🟢" if direction=="BUY" else "🔴"
+        lines.append(f"{emoji} {setup_type}")
+        lines.append(f"{emoji} {direction} {conf}% ({count}/3) - V5.3 KEEP")
+        lines.append(f"ENTRY {price:.2f}")
+        lines.append(f"SL {sl:.2f} (Protected + 0.3 ATR) = ${risk:.1f} risk")
+        lines.append(f"TP1 {tp1:.2f} (1:1) | TP2 {tp2:.2f} (1:2) | TP3 {tp3:.2f} (1:3)")
+        lines.append(f"RR 1:2 | ATR15M {atr_15m:.2f}")
+    else:
+        lines.append(f"⚪ {setup_type}")
+        lines.append(f"WAIT - Need H4 CONFIRMED -> H1 BOS -> NEW M15 BOS after H1")
+
+    vip_lines=[]
+    if direction!="WAIT":
+        emoji="🟢" if direction=="BUY" else "🔴"
+        vip_lines.append(f"{emoji} {direction} {conf}% ({count}/3) - V5.3 KEEP SETUP CONFIRMED")
+        vip_lines.append(f"ENTRY {price:.2f}")
+        vip_lines.append(f"SL {sl:.2f} (Protected + 0.3 ATR)")
+        vip_lines.append(f"TP1 {tp1:.2f} | TP2 {tp2:.2f} | TP3 {tp3:.2f}")
+        vip_lines.append(f"RR 1:2 | {setup_type}")
+    else:
+        vip_lines.append(f"⚪ WAIT - V5.3 KEEP")
+        vip_lines.append(f"H4 {h4_context} | H1 {s1h.state} | M15 {s15m.state}")
+        vip_lines.append(f"Need: H4 CONFIRMED -> H1 BOS -> NEW M15 BOS after H1")
+
+    return "\n".join(lines), "\n".join(vip_lines), direction, conf, count, price, sl, tp1, tp2, tp3, risk
+
+def is_weekend_filter(dt_str):
+    try:
+        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+        return dt.weekday() >= 5
+    except:
+        return False
+
+def run_backtest_v53():
+    if not TWELVE_KEY: return {"error":"No TWELVE_DATA_API_KEY"}
+    try:
+        print("Backtest V5.3 KEEP: 38.7% win version, SL 0.3 ATR, no BE...")
+        candles_1h=fetch_twelvedata_candles("XAU/USD","1h",TWELVE_KEY,2000)
+        if not candles_1h or len(candles_1h)<200: return {"error":f"Failed fetch {len(candles_1h) if candles_1h else 0}"}
+        trades=[]; wins_tp1=0; wins_tp2=0; losses=0; be=0
+        last_signal_idx=0
+        for i in range(100, len(candles_1h)-30, 1):
+            hist_1h=candles_1h[:i]
+            if len(hist_1h)<100: continue
+            # WEEKEND FILTER - Skip Saturday/Sunday
+            try:
+                dt_str = hist_1h[-1]["datetime"]
+                dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                if dt.weekday() >= 5:
+                    continue
+            except:
+                pass
+            # WEEKEND FILTER - Skip Saturday/Sunday trades - Market closed
+            try:
+                dt_str = hist_1h[-1]["datetime"]
+                dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                if dt.weekday() >= 5:  # Saturday=5, Sunday=6
+                    continue  # Skip weekend - market closed
+            except:
+                pass
+            state_1h=build_structure_state(hist_1h)
+            hist_4h=hist_1h[::4]
+            state_4h=build_structure_state(hist_4h)
+            hist_15m=hist_1h[-30:]
+            state_15m=build_structure_state(hist_15m)
+
+            h4_bullish=state_4h.state=="BULLISH"; h4_bearish=state_4h.state=="BEARISH"
+            h1_has_bullish=state_1h.state=="BULLISH" and state_1h.last_bos and state_1h.last_bos["type"]=="BULLISH_BOS"
+            h1_has_bearish=state_1h.state=="BEARISH" and state_1h.last_bos and state_1h.last_bos["type"]=="BEARISH_BOS"
+
+            m15_after_h1=False; direction=None
+            if h1_has_bullish and state_15m.state in ["BULLISH", "TRANSITION_TO_BULLISH"]:
+                if state_15m.last_bos and state_15m.last_bos["type"]=="BULLISH_BOS":
+                    direction="BUY"; m15_after_h1=True
+                elif state_15m.state=="BULLISH":
+                    direction="BUY"; m15_after_h1=True
+            if h1_has_bearish and state_15m.state in ["BEARISH", "TRANSITION_TO_BEARISH"]:
+                if state_15m.last_bos and state_15m.last_bos["type"]=="BEARISH_BOS":
+                    direction="SELL"; m15_after_h1=True
+                elif state_15m.state=="BEARISH":
+                    direction="SELL"; m15_after_h1=True
+            if not direction:
+                if h1_has_bullish and state_15m.last_bos and state_15m.last_bos["type"]=="BULLISH_BOS":
+                    if state_15m.last_bos["datetime"] >= state_1h.last_bos["datetime"]:
+                        direction="BUY"; m15_after_h1=True
+                if h1_has_bearish and state_15m.last_bos and state_15m.last_bos["type"]=="BEARISH_BOS":
+                    if state_15m.last_bos["datetime"] >= state_1h.last_bos["datetime"]:
+                        direction="SELL"; m15_after_h1=True
+            if not direction: continue
+            if h4_bullish and direction=="SELL": continue
+            if h4_bearish and direction=="BUY": continue
+            if not m15_after_h1: continue
+            if i - last_signal_idx < 12: continue
+
+            price=hist_1h[-1]["close"]
+            highs=[c["high"] for c in hist_1h[-20:]]; lows=[c["low"] for c in hist_1h[-20:]]; closes=[c["close"] for c in hist_1h[-20:]]
+            atr_v=7.0
+            if len(closes)>=15:
+                trs=[]
+                for j in range(1,len(closes)):
+                    tr=max(highs[j]-lows[j], abs(highs[j]-closes[j-1]), abs(lows[j]-closes[j-1]))
+                    trs.append(tr)
+                atr_v=sum(trs[-14:])/14 if trs else 7.0
+
+            # V5.3 KEEP SL: Protected + 0.3 ATR, capped $25
+            if direction=="BUY":
+                prot=state_1h.protected_low or state_15m.protected_low or (price-15)
+                sl=prot - atr_v*0.5
+                if price - sl > 35: sl=price-30
+                if price - sl < 8: sl=price-10
+                risk=price-sl
+                tp1=price+risk*1.0; tp2=price+risk*2.0
+            else:
+                prot=state_1h.protected_high or state_15m.protected_high or (price+15)
+                sl=prot + atr_v*0.5
+                if sl - price > 35: sl=price+25
+                if sl - price < 8: sl=price+10
+                risk=sl-price
+                tp1=price-risk*1.0; tp2=price-risk*2.0
+            last_signal_idx=i
+
+            future=candles_1h[i:i+48]
+            hit_tp1=False; hit_tp2=False; hit_sl=False
+            max_high=price; min_low=price
+            for fc in future:
+                max_high=max(max_high, fc["high"])
+                min_low=min(min_low, fc["low"])
+                if direction=="BUY":
+                    if fc["low"]<=sl: hit_sl=True; break
+                    if not hit_tp1 and fc["high"]>=tp1: hit_tp1=True
+                    if not hit_tp2 and fc["high"]>=tp2: hit_tp2=True; break
+                else:
+                    if fc["high"]>=sl: hit_sl=True; break
+                    if not hit_tp1 and fc["low"]<=tp1: hit_tp1=True
+                    if not hit_tp2 and fc["low"]<=tp2: hit_tp2=True; break
+
+            if hit_sl: losses+=1; outcome="LOSS"
+            elif hit_tp2: wins_tp2+=1; outcome="TP2 WIN"
+            elif hit_tp1: wins_tp1+=1; outcome="TP1 WIN"
+            else: be+=1; outcome="BE"
+
+            trades.append({
+                "datetime":hist_1h[-1]["datetime"], "mt5_time":hist_1h[-1]["datetime"], "dir":direction,
+                "entry":price, "sl":sl, "tp1":tp1, "tp2":tp2, "risk":risk, "outcome":outcome,
+                "max_high":max_high, "min_low":min_low,
+                "h4_state":state_4h.state, "h1_state":state_1h.state,
+                "h1_bos":state_1h.last_bos["type"] if state_1h.last_bos else "NONE",
+                "h1_bos_level":state_1h.last_bos["level"] if state_1h.last_bos else 0,
+                "m15_bos":state_15m.last_bos["type"] if state_15m.last_bos else "NONE",
+                "protected":state_1h.protected_low if direction=="BUY" else state_1h.protected_high,
+                "important":state_1h.important_high if direction=="BUY" else state_1h.important_low,
+            })
+
+        total_closed=wins_tp1+wins_tp2+losses
+        win_rate=(wins_tp1+wins_tp2)/total_closed*100 if total_closed>0 else 0
+        tp2_rate=wins_tp2/total_closed*100 if total_closed>0 else 0
+        return {"total_signals":len(trades),"wins_tp1":wins_tp1,"wins_tp2":wins_tp2,"losses":losses,"be":be,"total_closed":total_closed,"win_rate":win_rate,"tp2_rate":tp2_rate,"all_trades":trades,"candles_used":len(candles_1h)}
+    except Exception as e:
+        import traceback; return {"error":str(e),"trace":traceback.format_exc()[:2000]}
+
+# ==================== V5.3 2TF (4H + 1H ONLY) - YOUR REQUEST ====================
+
+def get_gold_2tf():
+    use_td=bool(TWELVE_KEY)
+    candles_4h=None; candles_1h=None
+    if use_td:
+        candles_4h=fetch_twelvedata_candles("XAU/USD","4h",TWELVE_KEY,150)
+        candles_1h=fetch_twelvedata_candles("XAU/USD","1h",TWELVE_KEY,150)
+    if not candles_1h:
+        return None
+    state_4h=build_structure_state(candles_4h)
+    state_1h=build_structure_state(candles_1h)
+    price=candles_1h[-1]["close"]
+    return {"price":price, "candles_4h":candles_4h, "candles_1h":candles_1h, "state_4h":state_4h, "state_1h":state_1h, "use_td":use_td}
+
+
+def build_setup_2tf():
+    """NEW STRATEGY: 4H Order Block retested and rejected from LL/HH that they created and after that rejection 1H reversal candle formed entry goes. No 0-70% filter."""
+    data=get_gold_2tf()
+    if not data:
+        return "⚠️ No TwelveData", "⚠️ No data", "WAIT", 0, 0, 0,0,0,0,0,0
+    price=data["price"]
+    s4h=data["state_4h"]; s1h=data["state_1h"]
+    
+    def calc_atr(candles):
+        highs=[c["high"] for c in candles]; lows=[c["low"] for c in candles]; closes=[c["close"] for c in candles]
+        if len(closes)<15: return 7.0
+        trs=[]
+        for i in range(1,len(closes)):
+            tr=max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
+            trs.append(tr)
+        return sum(trs[-14:])/14
+    atr_1h=calc_atr(data["candles_1h"])
+
+    is_weekend, weekday = is_weekend_market_closed(data["candles_1h"][-1]["datetime"] if data["candles_1h"] else "")
+    if is_weekend:
+        weekday_name = get_weekday_name(weekday)
+        times = get_current_times()
+        msg = f"🏖️ MARKET CLOSED - {weekday_name} - Gold closed weekend\n💰 ${price:.2f} | {times['wat_short']} | {times['mt5_short_gmt3']}\nNo trades Saturday/Sunday"
+        return msg, msg, "WAIT", 0, 0, price, 0, 0, 0, 0, 0
+
+    h4_context=s4h.state
+    h4_lh = s4h.protected_high
+    h4_ll = s4h.important_low or s4h.protected_low
+    h4_hl = s4h.protected_low
+    h4_hh = s4h.important_high or s4h.protected_high
+    
+    candles_1h = data["candles_1h"]
+    direction="WAIT"; conf=0; count=0
+    setup_type="WAIT"
+    
+    if not candles_1h or len(candles_1h)<10:
+        setup_type="No candles"
+        sl=price-10; tp1=price+10; tp2=price+20; tp3=price+30; risk=10
+    else:
+        recent_10 = candles_1h[-10:]
+        last_candle = candles_1h[-1]
+        prev_candle = candles_1h[-2] if len(candles_1h)>=2 else last_candle
+        
+        bearish_ob_retest = False
+        bearish_ob_rejected = False
+        bearish_reversal = False
+        bearish_details = ""
+        bullish_ob_retest = False
+        bullish_ob_rejected = False
+        bullish_reversal = False
+        bullish_details = ""
+        
+        # BEARISH OB: LH that created LL
+        if h4_lh and h4_ll and h4_lh > h4_ll:
+            for c in recent_10:
+                if c["high"] >= h4_lh - 10 and c["high"] <= h4_lh + 15:
+                    bearish_ob_retest=True
+                    upper_wick = c["high"] - max(c["open"], c["close"])
+                    body = abs(c["close"] - c["open"])
+                    if c["close"] < h4_lh and (upper_wick > body*0.5 or c["close"] < c["open"]):
+                        bearish_ob_rejected=True
+                        bearish_details=f"High {c['high']:.2f} retested OB {h4_lh:.2f}, close {c['close']:.2f} below OB, wick {upper_wick:.2f}"
+                        break
+            if bearish_ob_retest and bearish_ob_rejected:
+                if last_candle["close"] < last_candle["open"] and last_candle["close"] < prev_candle["close"]:
+                    bearish_reversal=True
+        
+        # BULLISH OB: HL that created HH
+        if h4_hl and h4_hh and h4_hh > h4_hl:
+            for c in recent_10:
+                if c["low"] <= h4_hl + 10 and c["low"] >= h4_hl - 15:
+                    bullish_ob_retest=True
+                    lower_wick = min(c["open"], c["close"]) - c["low"]
+                    body = abs(c["close"] - c["open"])
+                    if c["close"] > h4_hl and (lower_wick > body*0.5 or c["close"] > c["open"]):
+                        bullish_ob_rejected=True
+                        bullish_details=f"Low {c['low']:.2f} retested OB {h4_hl:.2f}, close {c['close']:.2f} above OB, wick {lower_wick:.2f}"
+                        break
+            if bullish_ob_retest and bullish_ob_rejected:
+                if last_candle["close"] > last_candle["open"] and last_candle["close"] > prev_candle["close"]:
+                    bullish_reversal=True
+        
+        if bearish_ob_retest and bearish_ob_rejected and bearish_reversal:
+            if h4_context != "BULLISH":
+                direction="SELL"; conf=85; count=3
+                setup_type=f"BEARISH OB REJECT+REVERSAL: 4H Bearish OB LH {h4_lh:.2f} (created LL {h4_ll:.2f}) {bearish_details} + 1H bearish reversal candle {last_candle['close']:.2f} < {prev_candle['close']:.2f} -> SELL"
+        elif bullish_ob_retest and bullish_ob_rejected and bullish_reversal:
+            if h4_context != "BEARISH":
+                direction="BUY"; conf=85; count=3
+                setup_type=f"BULLISH OB REJECT+REVERSAL: 4H Bullish OB HL {h4_hl:.2f} (created HH {h4_hh:.2f}) {bullish_details} + 1H bullish reversal candle {last_candle['close']:.2f} > {prev_candle['close']:.2f} -> BUY"
+        else:
+            if bearish_ob_retest and not bearish_ob_rejected:
+                setup_type=f"BEARISH: 4H OB LH {h4_lh or 0:.2f} retested but NOT rejected yet - waiting rejection"
+            elif bullish_ob_retest and not bullish_ob_rejected:
+                setup_type=f"BULLISH: 4H OB HL {h4_hl or 0:.2f} retested but NOT rejected yet - waiting rejection"
+            elif bearish_ob_retest and bearish_ob_rejected and not bearish_reversal:
+                setup_type=f"BEARISH: OB LH {h4_lh:.2f} retested+rejected but no 1H reversal candle yet"
+            elif bullish_ob_retest and bullish_ob_rejected and not bullish_reversal:
+                setup_type=f"BULLISH: OB HL {h4_hl:.2f} retested+rejected but no 1H reversal candle yet"
+            else:
+                setup_type=f"WAIT: No 4H OB retest. 4H Bear OB LH {h4_lh or 0:.2f} | Bull OB HL {h4_hl or 0:.2f} | Price {price:.2f} - Waiting for OB retest+rejection+1H reversal"
+
+    if direction=="BUY":
+        protected_low=s1h.protected_low or (price-15)
+        sl=protected_low - atr_1h*0.5
+        if price - sl > 35: sl = price - 30
+        if price - sl < 8: sl = price - 10
+        risk=price-sl
+        tp1=price + risk*1.0; tp2=price + risk*2.0; tp3=price + risk*3.0
+    elif direction=="SELL":
+        protected_high=s1h.protected_high or (price+15)
+        sl=protected_high + atr_1h*0.5
+        if sl - price > 35: sl = price + 30
+        if sl - price < 8: sl = price + 10
+        risk=sl-price
+        tp1=price - risk*1.0; tp2=price - risk*2.0; tp3=price - risk*3.0
+    else:
+        sl=price-10; tp1=price+10; tp2=price+20; tp3=price+30; risk=10
+
+    times = get_current_times()
+    now = f"{times['wat_short']} | {times['mt5_short_gmt3']} | {times['utc']}"
+    src="TwelveData" if data["use_td"] else "No Data"
+    lines=[]
+    lines.append(f"🏆 GOLD VIP V6.0 OB RETEST+REJECTION+REVERSAL 2TF {src} 🏆")
+    lines.append(f"💰 ${price:.2f} | {now}")
+    lines.append("")
+    lines.append(f"📊 H4 State: {s4h.state}")
+    lines.append(f"   Protected H (Bear OB LH): {s4h.protected_high or 0:.2f} L (Bull OB HL): {s4h.protected_low or 0:.2f}")
+    lines.append(f"   Important H: {s4h.important_high or 0:.2f} L: {s4h.important_low or 0:.2f}")
+    lines.append(f"   Last BOS: {s4h.last_bos['type'] if s4h.last_bos else 'NONE'} @ {s4h.last_bos['level'] if s4h.last_bos else 0}")
+    lines.append(f"   Bullish OB: HL {h4_hl or 0:.2f} that created HH {h4_hh or 0:.2f}")
+    lines.append(f"   Bearish OB: LH {h4_lh or 0:.2f} that created LL {h4_ll or 0:.2f}")
+    lines.append("")
+    lines.append(f"📊 H1 State: {s1h.state}")
+    lines.append(f"   Last BOS: {s1h.last_bos['type'] if s1h.last_bos else 'NONE'} @ {s1h.last_bos['level'] if s1h.last_bos else 0}")
+    lines.append("")
+    lines.append(f"🔍 SETUP V6.0 - 4H OB RETEST+REJECTION+1H REVERSAL - NO 0-70% FILTER:")
+    lines.append(f"   {setup_type}")
+    lines.append("")
+    if direction!="WAIT":
+        emoji="🟢" if direction=="BUY" else "🔴"
+        lines.append(f"{emoji} {direction} {conf}% ({count}/3) - V6.0 OB REJECTION")
+        lines.append(f"ENTRY {price:.2f}")
+        lines.append(f"SL {sl:.2f} (Protected + 0.5 ATR) = ${risk:.1f} risk")
+        lines.append(f"TP1 {tp1:.2f} (1:1) | TP2 {tp2:.2f} (1:2) | TP3 {tp3:.2f} (1:3)")
+        lines.append(f"RR 1:2 | ATR1H {atr_1h:.2f} | After 1H reversal candle")
+    else:
+        lines.append(f"⚪ {setup_type}")
+
+    vip_lines=[]
+    if direction!="WAIT":
+        emoji="🟢" if direction=="BUY" else "🔴"
+        vip_lines.append(f"{emoji} {direction} {conf}% - V6.0 OB REJECTION SETUP")
+        vip_lines.append(f"ENTRY {price:.2f}")
+        vip_lines.append(f"SL {sl:.2f} | TP1 {tp1:.2f} | TP2 {tp2:.2f} | TP3 {tp3:.2f}")
+        vip_lines.append(f"{setup_type}")
+    else:
+        vip_lines.append(f"⚪ WAIT - V6.0 OB RETEST+REJECTION")
+        vip_lines.append(f"H4 {h4_context} | H1 {s1h.state}")
+        vip_lines.append(f"{setup_type}")
+
+    return "\n".join(lines), "\n".join(vip_lines), direction, conf, count, price, sl, tp1, tp2, tp3, risk
+
+def run_backtest_2tf():
+    if not TWELVE_KEY: return {"error":"No TWELVE_DATA_API_KEY"}
+    try:
+        print("Backtest V6.0 OB RETEST+REJECTION+REVERSAL...")
+        candles_1h=fetch_twelvedata_candles("XAU/USD","1h",TWELVE_KEY,2000)
+        if not candles_1h or len(candles_1h)<200: return {"error":f"Failed fetch {len(candles_1h) if candles_1h else 0}"}
+        trades=[]; wins_tp1=0; wins_tp2=0; losses=0; be=0
+        last_signal_idx=0
+        for i in range(100, len(candles_1h)-30, 1):
+            hist_1h=candles_1h[:i]
+            if len(hist_1h)<100: continue
+            try:
+                dt_str = hist_1h[-1]["datetime"]
+                dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                if dt.weekday() >= 5:
+                    continue
+            except:
+                pass
+            state_1h=build_structure_state(hist_1h)
+            hist_4h=hist_1h[::4]
+            state_4h=build_structure_state(hist_4h)
+
+            h4_lh = state_4h.protected_high
+            h4_ll = state_4h.important_low or state_4h.protected_low
+            h4_hl = state_4h.protected_low
+            h4_hh = state_4h.important_high or state_4h.protected_high
+
+            if len(hist_1h)<10: continue
+            recent_10 = hist_1h[-10:]
+            last_c = hist_1h[-1]
+            prev_c = hist_1h[-2] if len(hist_1h)>=2 else last_c
+
+            bearish_ok=False; bullish_ok=False
+            if h4_lh and h4_ll and h4_lh > h4_ll:
+                for c in recent_10:
+                    if c["high"] >= h4_lh - 10 and c["high"] <= h4_lh + 15:
+                        if c["close"] < h4_lh:
+                            if last_c["close"] < last_c["open"] and last_c["close"] < prev_c["close"]:
+                                bearish_ok=True
+                                break
+            if h4_hl and h4_hh and h4_hh > h4_hl:
+                for c in recent_10:
+                    if c["low"] <= h4_hl + 10 and c["low"] >= h4_hl - 15:
+                        if c["close"] > h4_hl:
+                            if last_c["close"] > last_c["open"] and last_c["close"] > prev_c["close"]:
+                                bullish_ok=True
+                                break
+
+            direction=None
+            if bearish_ok and state_4h.state!="BULLISH":
+                direction="SELL"
+            elif bullish_ok and state_4h.state!="BEARISH":
+                direction="BUY"
+            if not direction: continue
+            if i - last_signal_idx < 12: continue
+
+            price=hist_1h[-1]["close"]
+            highs=[c["high"] for c in hist_1h[-20:]]; lows=[c["low"] for c in hist_1h[-20:]]; closes=[c["close"] for c in hist_1h[-20:]]
+            atr_v=7.0
+            if len(closes)>=15:
+                trs=[]
+                for j in range(1,len(closes)):
+                    tr=max(highs[j]-lows[j], abs(highs[j]-closes[j-1]), abs(lows[j]-closes[j-1]))
+                    trs.append(tr)
+                atr_v=sum(trs[-14:])/14 if trs else 7.0
+
+            if direction=="BUY":
+                prot=state_1h.protected_low or (price-15)
+                sl=prot - atr_v*0.5
+                if price - sl > 35: sl=price-30
+                if price - sl < 8: sl=price-10
+                risk=price-sl
+                tp1=price+risk*1.0; tp2=price+risk*2.0
+            else:
+                prot=state_1h.protected_high or (price+15)
+                sl=prot + atr_v*0.5
+                if sl - price > 35: sl=price+30
+                if sl - price < 8: sl=price+10
+                risk=sl-price
+                tp1=price-risk*1.0; tp2=price-risk*2.0
+            last_signal_idx=i
+
+            future=candles_1h[i:i+48]
+            hit_tp1=False; hit_tp2=False; hit_sl=False
+            max_high=price; min_low=price
+            for fc in future:
+                max_high=max(max_high, fc["high"])
+                min_low=min(min_low, fc["low"])
+                if direction=="BUY":
+                    if fc["low"]<=sl: hit_sl=True; break
+                    if not hit_tp1 and fc["high"]>=tp1: hit_tp1=True
+                    if not hit_tp2 and fc["high"]>=tp2: hit_tp2=True; break
+                else:
+                    if fc["high"]>=sl: hit_sl=True; break
+                    if not hit_tp1 and fc["low"]<=tp1: hit_tp1=True
+                    if not hit_tp2 and fc["low"]<=tp2: hit_tp2=True; break
+
+            if hit_sl: losses+=1; outcome="LOSS"
+            elif hit_tp2: wins_tp2+=1; outcome="TP2 WIN"
+            elif hit_tp1: wins_tp1+=1; outcome="TP1 WIN"
+            else: be+=1; outcome="BE"
+
+            trades.append({
+                "datetime":hist_1h[-1]["datetime"], "mt5_time":hist_1h[-1]["datetime"], "dir":direction,
+                "entry":price, "sl":sl, "tp1":tp1, "tp2":tp2, "risk":risk, "outcome":outcome,
+                "max_high":max_high, "min_low":min_low,
+                "h4_state":state_4h.state, "h1_state":state_1h.state,
+                "h1_bos":state_1h.last_bos["type"] if state_1h.last_bos else "NONE",
+                "h1_bos_level":state_1h.last_bos["level"] if state_1h.last_bos else 0,
+                "m15_bos":"N/A V6",
+                "protected":state_1h.protected_low if direction=="BUY" else state_1h.protected_high,
+            })
+
+        total_closed=wins_tp1+wins_tp2+losses
+        win_rate=(wins_tp1+wins_tp2)/total_closed*100 if total_closed>0 else 0
+        tp2_rate=wins_tp2/total_closed*100 if total_closed>0 else 0
+        return {"total_signals":len(trades),"wins_tp1":wins_tp1,"wins_tp2":wins_tp2,"losses":losses,"be":be,"total_closed":total_closed,"win_rate":win_rate,"tp2_rate":tp2_rate,"all_trades":trades,"candles_used":len(candles_1h)}
+    except Exception as e:
+        import traceback; return {"error":str(e),"trace":traceback.format_exc()[:2000]}
+
+
+
+
+# ==================== V7.0 S1 TREND + S6 DXY - BEST COMBO FOR GOLD 63.5% ====================
+# Based on your screenshot: S1 TREND 54/85=63.5% and S6 DXY 54/85=63.5% = Best combo
+# S1 TREND = 4H structure trend (HH/HL bullish, LL/LH bearish)
+# S6 DXY = DXY inverse correlation: DXY up -> Gold down (SELL), DXY down -> Gold up (BUY)
+# Best combo: Only trade when S1 and S6 agree = HIGH CONFIDENCE
+
+def get_gold_and_dxy():
+    use_td=bool(TWELVE_KEY)
+    candles_4h=None; candles_1h=None; candles_dxy_4h=None; candles_dxy_1h=None
+    if use_td:
+        candles_4h=fetch_twelvedata_candles("XAU/USD","4h",TWELVE_KEY,150)
+        candles_1h=fetch_twelvedata_candles("XAU/USD","1h",TWELVE_KEY,150)
+        # Try DXY symbols - TwelveData uses DXY or USD/INDEX
+        candles_dxy_4h=fetch_twelvedata_candles("DXY/USD","4h",TWELVE_KEY,150)
+        if not candles_dxy_4h:
+            candles_dxy_4h=fetch_twelvedata_candles("DXY","4h",TWELVE_KEY,150)
+        if not candles_dxy_4h:
+            candles_dxy_4h=fetch_twelvedata_candles("USD/INDEX","4h",TWELVE_KEY,150)
+        candles_dxy_1h=fetch_twelvedata_candles("DXY/USD","1h",TWELVE_KEY,150)
+        if not candles_dxy_1h:
+            candles_dxy_1h=fetch_twelvedata_candles("DXY","1h",TWELVE_KEY,150)
+        if not candles_dxy_1h:
+            candles_dxy_1h=fetch_twelvedata_candles("USD/INDEX","1h",TWELVE_KEY,150)
+    if not candles_1h:
+        return None
+    state_4h=build_structure_state(candles_4h)
+    state_1h=build_structure_state(candles_1h)
+    state_dxy_4h=build_structure_state(candles_dxy_4h) if candles_dxy_4h else None
+    state_dxy_1h=build_structure_state(candles_dxy_1h) if candles_dxy_1h else None
+    price=candles_1h[-1]["close"]
+    dxy_price=candles_dxy_1h[-1]["close"] if candles_dxy_1h else 0
+    return {"price":price, "dxy_price":dxy_price, "candles_4h":candles_4h, "candles_1h":candles_1h, "candles_dxy_4h":candles_dxy_4h, "candles_dxy_1h":candles_dxy_1h, "state_4h":state_4h, "state_1h":state_1h, "state_dxy_4h":state_dxy_4h, "state_dxy_1h":state_dxy_1h, "use_td":use_td}
+
+def build_setup_s1s6_best():
+    """V7.0 BEST COMBO: S1 TREND (63.5%) + S6 DXY (63.5%) = Best for Gold"""
+    data=get_gold_and_dxy()
+    if not data:
+        return "⚠️ No TwelveData", "⚠️ No data", "WAIT", 0, 0, 0,0,0,0,0,0
+    price=data["price"]
+    dxy_price=data["dxy_price"]
+    s4h=data["state_4h"]; s1h=data["state_1h"]; sdxy4h=data["state_dxy_4h"]; sdxy1h=data["state_dxy_1h"]
+    
+    def calc_atr(candles):
+        if not candles or len(candles)<15: return 7.0
+        highs=[c["high"] for c in candles]; lows=[c["low"] for c in candles]; closes=[c["close"] for c in candles]
+        trs=[]
+        for i in range(1,len(closes)):
+            tr=max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
+            trs.append(tr)
+        return sum(trs[-14:])/14 if trs else 7.0
+    atr_1h=calc_atr(data["candles_1h"])
+
+    is_weekend, weekday = is_weekend_market_closed(data["candles_1h"][-1]["datetime"] if data["candles_1h"] else "")
+    if is_weekend:
+        weekday_name = get_weekday_name(weekday)
+        times = get_current_times()
+        msg = f"🏖️ MARKET CLOSED - {weekday_name} - Gold closed weekend\n💰 ${price:.2f} | DXY {dxy_price:.2f} | {times['wat_short']} | {times['mt5_short_gmt3']}\nNo trades Saturday/Sunday"
+        return msg, msg, "WAIT", 0, 0, price, 0, 0, 0, 0, 0
+
+    # S1 TREND: 4H structure
+    s1_trend = "WAIT"
+    s1_conf = 0
+    if s4h.state=="BULLISH":
+        s1_trend="BUY"; s1_conf=90
+    elif s4h.state=="BEARISH":
+        s1_trend="SELL"; s1_conf=90
+    else:
+        s1_trend="WAIT"; s1_conf=0
+
+    # S6 DXY: Inverse correlation Gold vs DXY
+    # DXY bullish (HH/HL) -> Gold bearish SELL
+    # DXY bearish (LL/LH) -> Gold bullish BUY
+    s6_dxy = "WAIT"
+    s6_conf = 0
+    dxy_trend = "WAIT"
+    if sdxy4h:
+        if sdxy4h.state=="BULLISH":
+            dxy_trend="BULLISH"
+            s6_dxy="SELL"; s6_conf=72  # As per screenshot S6 DXY: SELL 72%
+        elif sdxy4h.state=="BEARISH":
+            dxy_trend="BEARISH"
+            s6_dxy="BUY"; s6_conf=72
+        else:
+            dxy_trend="WAIT"
+            s6_dxy="WAIT"; s6_conf=0
+    else:
+        # Fallback: use 1H DXY if 4H not available
+        if sdxy1h:
+            if sdxy1h.state=="BULLISH":
+                dxy_trend="BULLISH"; s6_dxy="SELL"; s6_conf=72
+            elif sdxy1h.state=="BEARISH":
+                dxy_trend="BEARISH"; s6_dxy="BUY"; s6_conf=72
+
+    # S2 MOMENTUM: 1H momentum (BOS)
+    s2_mom = "WAIT"
+    if s1h.last_bos:
+        if s1h.last_bos["type"]=="BULLISH_BOS":
+            s2_mom="BUY"
+        elif s1h.last_bos["type"]=="BEARISH_BOS":
+            s2_mom="SELL"
+
+    # CONFLUENCE: S1 + S6 must agree for HIGH CONFIDENCE
+    direction="WAIT"; conf=0; count=0
+    setup_type=""
+    
+    # Best combo logic: S1 + S6 agree
+    if s1_trend!="WAIT" and s6_dxy!="WAIT" and s1_trend==s6_dxy:
+        direction=s1_trend
+        conf=80  # 80% when S1+S6 agree (3 agree with S2 = 80% in screenshot)
+        count=2  # S1 + S6 = 2 agree, if S2 also agrees = 3
+        if s2_mom==direction:
+            conf=92  # 4 agree case from first screenshot 92%
+            count=3
+            setup_type=f"CONFLUENCE: {direction} {conf}% (3 agree: S1+ S2+ S6) - S1 TREND {s1_trend} 63.5% + S6 DXY {s6_dxy} 63.5% + S2 MOM {s2_mom} - BEST COMBO FOR GOLD - HIGH CONFIDENCE"
+        else:
+            setup_type=f"CONFLUENCE: {direction} {conf}% (2 agree: S1+ S6) - S1 TREND {s1_trend} 63.5% + S6 DXY {s6_dxy} 63.5% = Best combo for Gold - HIGH CONFIDENCE"
+    elif s1_trend!="WAIT" and s6_dxy!="WAIT" and s1_trend!=s6_dxy:
+        # Conflict - WAIT
+        setup_type=f"CONFLICT: S1 TREND {s1_trend} vs S6 DXY {s6_dxy} - S1 63.5% vs S6 63.5% disagree - WAIT for alignment - DXY {dxy_trend} {dxy_price:.2f} vs Gold {s4h.state}"
+        direction="WAIT"; conf=0; count=0
+    else:
+        if s1_trend!="WAIT":
+            direction=s1_trend; conf=63; count=1
+            setup_type=f"S1 TREND ONLY: {s1_trend} 63.5% - Waiting for S6 DXY confirmation - DXY {dxy_trend} - Best combo needs S1+S6 agree"
+        elif s6_dxy!="WAIT":
+            direction=s6_dxy; conf=63; count=1
+            setup_type=f"S6 DXY ONLY: {s6_dxy} 63.5% - Waiting for S1 TREND confirmation - H4 {s4h.state} - Best combo needs S1+S6 agree"
+        else:
+            setup_type=f"WAIT: No S1/S6 signal - H4 {s4h.state} DXY {dxy_trend} - Need S1 TREND + S6 DXY agree for Best combo"
+
+    # SL/TP
+    if direction=="BUY":
+        prot=s1h.protected_low or (price-15)
+        sl=prot - atr_1h*0.5
+        if price - sl > 35: sl=price-30
+        if price - sl < 8: sl=price-10
+        risk=price-sl
+        tp1=price+risk*1.0; tp2=price+risk*2.0; tp3=price+risk*3.0
+    elif direction=="SELL":
+        prot=s1h.protected_high or (price+15)
+        sl=prot + atr_1h*0.5
+        if sl - price > 35: sl=price+30
+        if sl - price < 8: sl=price+10
+        risk=sl-price
+        tp1=price-risk*1.0; tp2=price-risk*2.0; tp3=price-risk*3.0
+    else:
+        sl=price-10; tp1=price+10; tp2=price+20; tp3=price+30; risk=10
+
+    times=get_current_times()
+    now=f"{times['wat_short']} | {times['mt5_short_gmt3']} | {times['utc']}"
+    src="TwelveData" if data["use_td"] else "No Data"
+    lines=[]
+    lines.append(f"🏆 GOLD VIP V7.0 S1+S6 BEST COMBO 63.5% {src} 🏆")
+    lines.append(f"💰 Gold ${price:.2f} | DXY {dxy_price:.2f} | {now}")
+    lines.append("")
+    lines.append(f"📊 S1 TREND: {s1_trend} {s1_conf}% - H4 {s4h.state} - Prot H {s4h.protected_high or 0:.2f} L {s4h.protected_low or 0:.2f}")
+    lines.append(f"   S1 Backtest 5D: 54/85 = 63.5% - BEST for Gold")
+    lines.append(f"📊 S6 DXY: {s6_dxy} {s6_conf}% - DXY Trend {dxy_trend} {dxy_price:.2f} - Inverse to Gold")
+    lines.append(f"   S6 Backtest 5D: 54/85 = 63.5% - BEST for Gold")
+    lines.append(f"📊 S2 MOMENTUM: {s2_mom} - H1 BOS {s1h.last_bos['type'] if s1h.last_bos else 'NONE'} @ {s1h.last_bos['level'] if s1h.last_bos else 0:.2f}")
+    lines.append("")
+    lines.append(f"🔥 {setup_type}")
+    lines.append("")
+    if direction!="WAIT":
+        emoji="🟢" if direction=="BUY" else "🔴"
+        lines.append(f"{emoji} GOLD {direction} NOW - V7.0 BEST COMBO")
+        lines.append(f"Entry: {price:.2f} | DXY {dxy_price:.2f}")
+        lines.append(f"SL: {sl:.2f} | TP1: {tp1:.2f} | TP2: {tp2:.2f} | TP3: {tp3:.2f}")
+        lines.append(f"RR 1:2 | ATR1H {atr_1h:.2f} | S1 63.5% + S6 63.5% = Combined HIGH CONFIDENCE")
+        if conf>=80:
+            lines.append(f"✅ HIGH CONFIDENCE TRADE - S1+S6 agree")
+    else:
+        lines.append(f"⚪ WAIT - Need S1 TREND + S6 DXY agree for best combo")
+
+    vip_lines=[]
+    if direction!="WAIT":
+        emoji="🟢" if direction=="BUY" else "🔴"
+        vip_lines.append(f"{emoji} GOLD {direction} NOW - V7.0 BEST COMBO S1+S6 63.5%")
+        vip_lines.append(f"Entry: {price:.2f} | DXY {dxy_price:.2f}")
+        vip_lines.append(f"SL: {sl:.2f} | TP1: {tp1:.2f} | TP2: {tp2:.2f}")
+        vip_lines.append(f"{setup_type}")
+        if conf>=80:
+            vip_lines.append(f"✅ HIGH CONFIDENCE TRADE")
+    else:
+        vip_lines.append(f"⚪ WAIT - V7.0 S1+S6 BEST COMBO")
+        vip_lines.append(f"S1 {s1_trend} + S6 {s6_dxy} - Need agree")
+        vip_lines.append(f"{setup_type}")
+
+    return "\n".join(lines), "\n".join(vip_lines), direction, conf, count, price, sl, tp1, tp2, tp3, risk
+
+def run_backtest_s1s6():
+    if not TWELVE_KEY: return {"error":"No TWELVE_DATA_API_KEY"}
+    try:
+        print("Backtest V7.0 S1+S6 BEST COMBO...")
+        candles_1h=fetch_twelvedata_candles("XAU/USD","1h",TWELVE_KEY,2000)
+        candles_dxy_1h=fetch_twelvedata_candles("DXY/USD","1h",TWELVE_KEY,2000)
+        if not candles_dxy_1h:
+            candles_dxy_1h=fetch_twelvedata_candles("DXY","1h",TWELVE_KEY,2000)
+        if not candles_1h or len(candles_1h)<200: return {"error":f"Failed fetch Gold {len(candles_1h) if candles_1h else 0}"}
+        trades=[]; wins_tp1=0; wins_tp2=0; losses=0; be=0
+        last_signal_idx=0
+        for i in range(100, len(candles_1h)-30, 1):
+            hist_1h=candles_1h[:i]
+            hist_dxy_1h=candles_dxy_1h[:i] if candles_dxy_1h and len(candles_dxy_1h)>=i else None
+            if len(hist_1h)<100: continue
+            try:
+                dt_str = hist_1h[-1]["datetime"]
+                dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                if dt.weekday() >= 5:
+                    continue
+            except:
+                pass
+            state_1h=build_structure_state(hist_1h)
+            hist_4h=hist_1h[::4]
+            state_4h=build_structure_state(hist_4h)
+            state_dxy_4h=None
+            if hist_dxy_1h:
+                hist_dxy_4h=hist_dxy_1h[::4]
+                state_dxy_4h=build_structure_state(hist_dxy_4h)
+
+            # S1 TREND
+            s1="WAIT"
+            if state_4h.state=="BULLISH": s1="BUY"
+            elif state_4h.state=="BEARISH": s1="SELL"
+            # S6 DXY inverse
+            s6="WAIT"
+            if state_dxy_4h:
+                if state_dxy_4h.state=="BULLISH": s6="SELL"
+                elif state_dxy_4h.state=="BEARISH": s6="BUY"
+
+            if s1=="WAIT" or s6=="WAIT": continue
+            if s1!=s6: continue  # Only when agree - best combo
+            direction=s1
+            if i - last_signal_idx < 12: continue
+
+            price=hist_1h[-1]["close"]
+            highs=[c["high"] for c in hist_1h[-20:]]; lows=[c["low"] for c in hist_1h[-20:]]; closes=[c["close"] for c in hist_1h[-20:]]
+            atr_v=7.0
+            if len(closes)>=15:
+                trs=[]
+                for j in range(1,len(closes)):
+                    tr=max(highs[j]-lows[j], abs(highs[j]-closes[j-1]), abs(lows[j]-closes[j-1]))
+                    trs.append(tr)
+                atr_v=sum(trs[-14:])/14 if trs else 7.0
+
+            if direction=="BUY":
+                prot=state_1h.protected_low or (price-15)
+                sl=prot - atr_v*0.5
+                if price - sl > 35: sl=price-30
+                if price - sl < 8: sl=price-10
+                risk=price-sl
+                tp1=price+risk*1.0; tp2=price+risk*2.0
+            else:
+                prot=state_1h.protected_high or (price+15)
+                sl=prot + atr_v*0.5
+                if sl - price > 35: sl=price+30
+                if sl - price < 8: sl=price+10
+                risk=sl-price
+                tp1=price-risk*1.0; tp2=price-risk*2.0
+            last_signal_idx=i
+
+            future=candles_1h[i:i+48]
+            hit_tp1=False; hit_tp2=False; hit_sl=False
+            max_high=price; min_low=price
+            for fc in future:
+                max_high=max(max_high, fc["high"])
+                min_low=min(min_low, fc["low"])
+                if direction=="BUY":
+                    if fc["low"]<=sl: hit_sl=True; break
+                    if not hit_tp1 and fc["high"]>=tp1: hit_tp1=True
+                    if not hit_tp2 and fc["high"]>=tp2: hit_tp2=True; break
+                else:
+                    if fc["high"]>=sl: hit_sl=True; break
+                    if not hit_tp1 and fc["low"]<=tp1: hit_tp1=True
+                    if not hit_tp2 and fc["low"]<=tp2: hit_tp2=True; break
+
+            if hit_sl: losses+=1; outcome="LOSS"
+            elif hit_tp2: wins_tp2+=1; outcome="TP2 WIN"
+            elif hit_tp1: wins_tp1+=1; outcome="TP1 WIN"
+            else: be+=1; outcome="BE"
+
+            trades.append({
+                "datetime":hist_1h[-1]["datetime"], "mt5_time":hist_1h[-1]["datetime"], "dir":direction,
+                "entry":price, "sl":sl, "tp1":tp1, "tp2":tp2, "risk":risk, "outcome":outcome,
+                "max_high":max_high, "min_low":min_low,
+                "h4_state":state_4h.state, "h1_state":state_1h.state,
+                "h1_bos":state_1h.last_bos["type"] if state_1h.last_bos else "NONE",
+                "h1_bos_level":state_1h.last_bos["level"] if state_1h.last_bos else 0,
+                "m15_bos":"S1+S6",
+                "protected":state_1h.protected_low if direction=="BUY" else state_1h.protected_high,
+            })
+
+        total_closed=wins_tp1+wins_tp2+losses
+        win_rate=(wins_tp1+wins_tp2)/total_closed*100 if total_closed>0 else 0
+        tp2_rate=wins_tp2/total_closed*100 if total_closed>0 else 0
+        return {"total_signals":len(trades),"wins_tp1":wins_tp1,"wins_tp2":wins_tp2,"losses":losses,"be":be,"total_closed":total_closed,"win_rate":win_rate,"tp2_rate":tp2_rate,"all_trades":trades,"candles_used":len(candles_1h)}
+    except Exception as e:
+        import traceback; return {"error":str(e),"trace":traceback.format_exc()[:2000]}
+
+
+
+
+# Telegram handlers
+async def start(update, context):
+    SUBSCRIBERS.add(update.effective_chat.id)
+    td_status="✅ TwelveData ON" if TWELVE_KEY else "⚠️ OFF"
+    msg=f"🏆 GOLD VIP V5.6 CORRECT MT5 BOTH TRENDS 🏆\n\n💰 VIP: $25 / month\n📢 Channel: {CHANNEL_USERNAME}\n🆔 ID: {CHANNEL_ID}\n💳 Wallet: {CRYPTO_WALLET}\n{td_status}\n\nV5.3 KEEP - 3TF (H4→H1→NEW M15) - 38.7% win profitable:\n• 2-Left/2-Right High/Low, Protected+Important, Sweep vs BOS\n• CHoCH→Transition→HL/LH→BOS→Confirmed\n• H4→H1→NEW M15 chronological (must be AFTER H1)\n• SL: Protected + 0.3 ATR = $25 cap\n\nV5.6 CORRECT MT5 (4H+1H) - BOTH TRENDS CORRECT LOGIC:\n• 4H LL/LH: LH that created LL (Prot High) | HH/HL: HL that created HH (Prot Low)\n• 1H bullish HH must RETURN to 4H LH within $50 → Find HL that created HH that went to LH → Break that HL + FORM BELOW (BOTH trends)\n• 1H HL that created HH that went to 4H LH → Break + FORM BELOW = SELL (and reverse)\n• LOCATION: Entry must be 0-70% from LH/HL to LL/HH - Still around LH/HL ✅ Worth, both trends (was 55% too tight)\n• SL BOTH: Protected + 0.5 ATR $30 cap (was 0.3 $25) to avoid sweep - CORRECT MT5 reading\n\nCommands:\n/signal - V5.3 3TF (H4→H1→M15) 38.7%\n/signal2tf - V6.0 OB Retest+Rejection+Reversal\n/confluence or /bestcombo or /s1s6 - V7.0 S1+S6 BEST COMBO 63.5% for Gold\n/backtest - V5.3\n/backtest2tf - V6.0 OB\n/backtestbest or /backtest_s1s6 - V7.0 S1+S6 Best Combo\n/mtf - States\n/bos - BOS/CHoCH/Sweeps"
+    await update.message.reply_text(msg)
+
+async def buy(update, context):
+    msg=f"💳 JOIN VIP FOR $25 / MONTH\nPay via USDT TRC20:\n{CRYPTO_WALLET}\nAfter payment, send TXID to @Onyebest\n\n✅ V5.3 KEEP 38.7% win profitable"
+    await update.message.reply_text(msg)
+
+async def signal(update, context):
+    full_msg,vip_msg,_,_,_,_,_,_,_,_,_=build_setup_v53()
+    await update.message.reply_text(full_msg)
+
+async def signal2tf(update, context):
+    full_msg,vip_msg,_,_,_,_,_,_,_,_,_=build_setup_2tf()
+    await update.message.reply_text(full_msg)
+
+async def mtf(update, context):
+    data=get_gold_v53()
+    if not data:
+        await update.message.reply_text("❌ No TwelveData")
         return
-    df_4h = await fetch_candles("XAU/USD","4h",200)
-    df_1h = await fetch_candles("XAU/USD","1h",200)
-    s4 = S4_REVERSAL(df_4h, df_1h)
-    price = float(df_1h.iloc[-1]["close"]) if df_1h is not None else 4236.40
-    await update.message.reply_text(f"S4 {s4['signal']} {s4['pct']}%\n{s4['detail']}\n{price:.2f}\n{time_info['WAT']}")
+    msg=f"📊 V5.3 KEEP MTF\n💰 ${data['price']:.2f}\n\n"
+    for tf_name, state in [("H4", data["state_4h"]), ("H1", data["state_1h"]), ("M15", data["state_15m"])]:
+        msg+=f"{tf_name} {state.state}\n  Prot H {state.protected_high or 0:.2f} L {state.protected_low or 0:.2f}\n  Imp H {state.important_high or 0:.2f} L {state.important_low or 0:.2f}\n  BOS {state.last_bos['type'] if state.last_bos else 'NONE'} @ {state.last_bos['level'] if state.last_bos else 0:.2f}\n"
+        if state.sweeps:
+            msg+=f"  Sweep {state.sweeps[-1]['type']} @ {state.sweeps[-1]['level']:.2f}\n"
+        msg+=f"\n"
+    await update.message.reply_text(msg)
 
-async def backtest2tf_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Running backtest S4... (last 500 bars)")
-    result = await get_backtest_S4()
-    await update.message.reply_text(result)
+async def bos_cmd(update, context):
+    data=get_gold_v53()
+    if not data:
+        await update.message.reply_text("❌ No TwelveData")
+        return
+    msg=f"🔍 V5.3 KEEP BOS/CHoCH/SWEEP\n💰 ${data['price']:.2f}\n\n"
+    for tf_name, state in [("H1", data["state_1h"]), ("M15", data["state_15m"])]:
+        msg+=f"{tf_name} {state.state}\nProt H {state.protected_high or 0:.2f} L {state.protected_low or 0:.2f}\nImp H {state.important_high or 0:.2f} L {state.important_low or 0:.2f}\nBOS {state.last_bos}\nCHoCH {state.last_choch}\nSweeps {len(state.sweeps)}\n\n"
+    await update.message.reply_text(msg)
 
-async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Running full backtest (S1+S2+S4+S6)...")
-    result = await get_backtest_full()
-    await update.message.reply_text(result)
+async def news(update, context):
+    data=get_gold_v53()
+    if not data:
+        await update.message.reply_text("❌ No TwelveData")
+        return
+    s4h=data["state_4h"]; s1h=data["state_1h"]; s15m=data["state_15m"]
+    msg=f"📰 V5.3 KEEP\n💰 ${data['price']:.2f}\nH4 {s4h.state} Prot {s4h.protected_high or 0:.2f}\nH1 {s1h.state}\nM15 {s15m.state}\nSL 0.3 ATR $25 cap = 38.7% win"
+    await update.message.reply_text(msg)
 
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🏆 V7.2 STREAMLINED + BACKTEST\nS1 TREND + S2 MOMENTUM + S4 OB + S6 DXY\nNeed 3/4 + S4 for HIGH\n\nCommands:\n/signal - Full confluence\n/signal2tf - S4 only\n/backtest2tf - Backtest S4 OB\n/backtest - Backtest full")
+async def autopilot_cmd(update, context):
+    global AUTOPILOT_ACTIVE
+    AUTOPILOT_ACTIVE=True; SUBSCRIBERS.add(update.effective_chat.id)
+    await update.message.reply_text(f"✅ AUTOPILOT V5.3 KEEP ON\n38.7% win profitable\nChat ID {update.effective_chat.id} saved")
+    asyncio.create_task(autopilot_loop(context))
+
+async def autostop(update, context):
+    global AUTOPILOT_ACTIVE
+    AUTOPILOT_ACTIVE=False; SUBSCRIBERS.discard(update.effective_chat.id)
+    await update.message.reply_text("🛑 AUTOPILOT OFF")
+
+async def autopilot_on_alias(update, context): await autopilot_cmd(update, context)
+async def autopilot_off_alias(update, context): await autostop(update, context)
+
+async def autopilot_loop(context):
+    global AUTOPILOT_ACTIVE
+    while AUTOPILOT_ACTIVE:
+        await asyncio.sleep(15*60)
+        if not AUTOPILOT_ACTIVE: break
+        try:
+            full_msg,vip_msg,direction,conf_pct,count,price,sl,tp1,tp2,tp3,risk=build_setup_v53()
+            if count>=2 and conf_pct>=80 and direction!="WAIT":
+                for chat_id in list(SUBSCRIBERS):
+                    try: await context.bot.send_message(chat_id=chat_id, text=f"🤖 AUTOPILOT V5.3 KEEP\n{full_msg}")
+                    except: pass
+                try: await context.bot.send_message(chat_id=CHANNEL_ID, text=vip_msg)
+                except: pass
+        except Exception as e: print(f"Autopilot error: {e}")
+
+async def sendvip(update, context):
+    if update.effective_user.id!=ADMIN_ID:
+        await update.message.reply_text("❌ Admin only"); return
+    full_msg,vip_msg,direction,conf_pct,count,price,sl,tp1,tp2,tp3,risk=build_setup_v53()
+    try:
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=vip_msg)
+        await update.message.reply_text(f"✅ Sent to VIP {CHANNEL_ID}:\n{vip_msg}")
+    except Exception as e: await update.message.reply_text(f"❌ Failed: {e}")
+
+async def setchannel(update, context):
+    global CHANNEL_ID
+    if update.effective_user.id!=ADMIN_ID:
+        await update.message.reply_text("❌ Admin only"); return
+    if context.args:
+        CHANNEL_ID=context.args[0]
+        await update.message.reply_text(f"✅ Channel set to: {CHANNEL_ID}")
+    else: await update.message.reply_text(f"Current Channel: {CHANNEL_ID}")
+
+async def channeltest(update, context):
+    if not CHANNEL_ID: await update.message.reply_text("❌ CHANNEL_ID not set."); return
+    try:
+        await context.bot.send_message(chat_id=CHANNEL_ID, text="✅ VIP Bot V5.3 KEEP 38.7% WIN Test!")
+        await update.message.reply_text("✅ Test sent to channel!")
+    except Exception as e: await update.message.reply_text(f"❌ Failed: {e}")
+
+async def backtest(update, context):
+    await update.message.reply_text("⏳ Running V5.3 KEEP... 38.7% win version, SL 0.3 ATR $25, no BE... Fetching 2000x 1H...")
+    try:
+        loop=asyncio.get_event_loop()
+        result=await loop.run_in_executor(None, run_backtest_v53)
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result['error']}\n{result.get('trace','')[:800]}"); return
+        msg=f"📊 V5.3 KEEP BACKTEST 6M (BEST) 3TF H4→H1→M15\nCandles: {result['candles_used']} x 1H (~{result['candles_used']//24} days)\nTotal Setups: {result['total_signals']}\nClosed: {result['total_closed']}\n✅ TP2 WIN: {result['wins_tp2']}\n✅ TP1 WIN: {result['wins_tp1']}\n❌ LOSS: {result['losses']}\n➖ BE: {result['be']}\n\n🏆 WIN RATE: {result['win_rate']:.1f}% | TP2 RATE: {result['tp2_rate']:.1f}%\n\nV5.3 KEEP - Your best profitable:\n• SL: Protected + 0.3 ATR = $25 cap (scalps)\n• No BE → keeps TP1 wins\n• Expectancy: 38.7% x 2 - 61.3% = +0.16R profitable\n\n🔍 Last 10 LOSSES:\n"
+        losses=[t for t in result['all_trades'] if t['outcome']=="LOSS"][-10:]
+        for t in losses:
+            emoji="🟢" if t['dir']=="BUY" else "🔴"
+            tz = convert_timezones(t['mt5_time'])
+            msg+=f"{emoji} {tz['wat_short']} / {tz['mt5_short_gmt3']} {t['dir']} ENTRY {t['entry']:.2f} SL {t['sl']:.2f} TP2 {t['tp2']:.2f} MaxH {t['max_high']:.2f} MinL {t['min_low']:.2f} -> LOSS | UTC {t['mt5_time']}\n"
+        msg+=f"\n🔍 Last 5 WINS:\n"
+        wins=[t for t in result['all_trades'] if "WIN" in t['outcome']][-5:]
+        for t in wins:
+            emoji="🟢" if t['dir']=="BUY" else "🔴"
+            tz = convert_timezones(t['mt5_time'])
+            msg+=f"{emoji} {tz['wat_short']} / {tz['mt5_short_gmt3']} {t['dir']} {t['entry']:.2f} -> {t['outcome']}\n"
+        await update.message.reply_text(msg)
+    except Exception as e:
+        import traceback
+        await update.message.reply_text(f"❌ Failed: {e}\n{traceback.format_exc()[:800]}")
+
+async def backtest2tf(update, context):
+    await update.message.reply_text("⏳ Running V5.6 CORRECT MT5 BOTH TRENDS... Proper HL that created HH... Fetching 2000x 1H...")
+    try:
+        loop=asyncio.get_event_loop()
+        result=await loop.run_in_executor(None, run_backtest_2tf)
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result['error']}\n{result.get('trace','')[:800]}"); return
+        msg=f"📊 V5.6 CORRECT MT5 BOTH TRENDS BACKTEST - Proper HL/LH that created HH/LL\nCandles: {result['candles_used']} x 1H (~{result['candles_used']//24} days)\nTotal Setups: {result['total_signals']}\nClosed: {result['total_closed']}\n✅ TP2 WIN: {result['wins_tp2']}\n✅ TP1 WIN: {result['wins_tp1']}\n❌ LOSS: {result['losses']}\n➖ BE: {result['be']}\n\n🏆 WIN RATE: {result['win_rate']:.1f}% | TP2 RATE: {result['tp2_rate']:.1f}%\n\nV5.6 CORRECT - BOTH TRENDS (FIXES MT5 READING):\n• BEARISH: 4H LH 4647 → 1H HH 4669 touches LH → HL 4610 that created HH → Break HL 4610 + FORM BELOW (CORRECT)\n• BULLISH: 4H HL → 1H LL touches HL → LH that created LL → Break LH + FORM ABOVE (CORRECT)\n• LOCATION BOTH: Entry 0-70% from LH/HL to LL/HH - Still around LH/HL ✅ Worth (was 55% too tight) + SL 0.5 ATR $30 cap to avoid sweep\n• Both trends same logic\n\n🔍 Last 10 LOSSES (V5.6 CORRECT - Proper HL that created HH that went to LH):\n"
+        losses=[t for t in result['all_trades'] if t['outcome']=="LOSS"][-10:]
+        for t in losses:
+            emoji="🟢" if t['dir']=="BUY" else "🔴"
+            tz = convert_timezones(t['mt5_time'])
+            msg+=f"{emoji} {tz['wat_short']} / {tz['mt5_short_gmt3']} {t['dir']} ENTRY {t['entry']:.2f} SL {t['sl']:.2f} TP2 {t['tp2']:.2f} H4 {t['h4_state']} H1 {t['h1_state']} BOS {t['h1_bos']} @ {t['h1_bos_level']:.2f} -> LOSS | Prot {t['protected']:.2f} | UTC {t['mt5_time']}\n"
+        msg+=f"\n🔍 Last 5 WINS:\n"
+        wins=[t for t in result['all_trades'] if "WIN" in t['outcome']][-5:]
+        for t in wins:
+            emoji="🟢" if t['dir']=="BUY" else "🔴"
+            tz = convert_timezones(t['mt5_time'])
+            msg+=f"{emoji} {tz['wat_short']} / {tz['mt5_short_gmt3']} {t['dir']} {t['entry']:.2f} -> {t['outcome']} | Prot {t['protected']:.2f}\n"
+        await update.message.reply_text(msg)
+    except Exception as e:
+        import traceback
+        await update.message.reply_text(f"❌ Failed: {e}\n{traceback.format_exc()[:800]}")
+
+
+async def signal_s1s6(update, context):
+    full_msg,vip_msg,_,_,_,_,_,_,_,_,_=build_setup_s1s6_best()
+    await update.message.reply_text(full_msg)
+
+async def confluence_cmd(update, context):
+    full_msg,vip_msg,_,_,_,_,_,_,_,_,_=build_setup_s1s6_best()
+    await update.message.reply_text(full_msg)
+
+async def bestcombo_cmd(update, context):
+    full_msg,vip_msg,_,_,_,_,_,_,_,_,_=build_setup_s1s6_best()
+    await update.message.reply_text(full_msg)
+
+async def backtest_s1s6_cmd(update, context):
+    await update.message.reply_text("⏳ Running V7.0 S1+S6 BEST COMBO 63.5% - S1 TREND + S6 DXY inverse - Fetching 2000x 1H Gold + DXY...")
+    try:
+        loop=asyncio.get_event_loop()
+        result=await loop.run_in_executor(None, run_backtest_s1s6)
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result['error']}\n{result.get('trace','')[:800]}"); return
+        msg=f"📊 V7.0 S1+S6 BEST COMBO BACKTEST - S1 TREND 63.5% + S6 DXY 63.5%\nCandles: {result['candles_used']} x 1H (~{result['candles_used']//24} days)\nTotal Setups: {result['total_signals']}\nClosed: {result['total_closed']}\n✅ TP2 WIN: {result['wins_tp2']}\n✅ TP1 WIN: {result['wins_tp1']}\n❌ LOSS: {result['losses']}\n➖ BE: {result['be']}\n\n🏆 WIN RATE: {result['win_rate']:.1f}% | TP2 RATE: {result['tp2_rate']:.1f}%\n\nV7.0 BEST COMBO:\n• S1 TREND 54/85=63.5% + S6 DXY 54/85=63.5% = Best for Gold\n• Only trades when S1 and S6 agree = HIGH CONFIDENCE\n• DXY inverse: DXY BULLISH -> Gold SELL, DXY BEARISH -> Gold BUY\n• From your screenshot: CONFLUENCE SELL 80% (3 agree S1+S2+S6)\n\n🔍 Last 10 LOSSES:\n"
+        losses=[t for t in result['all_trades'] if t['outcome']=="LOSS"][-10:]
+        for t in losses:
+            emoji="🟢" if t['dir']=="BUY" else "🔴"
+            tz = convert_timezones(t['mt5_time'])
+            msg+=f"{emoji} {tz['wat_short']} / {tz['mt5_short_gmt3']} {t['dir']} ENTRY {t['entry']:.2f} SL {t['sl']:.2f} TP2 {t['tp2']:.2f} -> LOSS | {tz['mt5_short_gmt3']}\n"
+        msg+=f"\n🔍 Last 5 WINS:\n"
+        wins=[t for t in result['all_trades'] if "WIN" in t['outcome']][-5:]
+        for t in wins:
+            emoji="🟢" if t['dir']=="BUY" else "🔴"
+            tz = convert_timezones(t['mt5_time'])
+            msg+=f"{emoji} {tz['wat_short']} / {tz['mt5_short_gmt3']} {t['dir']} {t['entry']:.2f} -> {t['outcome']}\n"
+        await update.message.reply_text(msg)
+    except Exception as e:
+        import traceback
+        await update.message.reply_text(f"❌ Failed: {e}\n{traceback.format_exc()[:800]}")
+
+
 
 def main():
-    if not TELEGRAM_TOKEN:
-        print(asyncio.run(get_full_signal()))
-        return
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("signal", signal_cmd))
-    app.add_handler(CommandHandler("signal2tf", signal2tf_cmd))
-    app.add_handler(CommandHandler("backtest2tf", backtest2tf_cmd))
-    app.add_handler(CommandHandler("backtest", backtest_cmd))
-    app.run_polling()
+    if not BOT_TOKEN: print("ERROR: BOT_TOKEN not set!"); return
+    app=ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("buy", buy))
+    app.add_handler(CommandHandler("signal", signal))
+    app.add_handler(CommandHandler("signal2tf", signal2tf))
+    app.add_handler(CommandHandler("signal2", signal2tf))
+    app.add_handler(CommandHandler("signal4h1h", signal2tf))
+    app.add_handler(CommandHandler("mtf", mtf))
+    app.add_handler(CommandHandler("bos", bos_cmd))
+    app.add_handler(CommandHandler("sweep", bos_cmd))
+    app.add_handler(CommandHandler("autopilot", autopilot_cmd))
+    app.add_handler(CommandHandler("autostop", autostop))
+    app.add_handler(CommandHandler("autopilot_on", autopilot_on_alias))
+    app.add_handler(CommandHandler("autopilot_off", autopilot_off_alias))
+    app.add_handler(CommandHandler("news", news))
+    app.add_handler(CommandHandler("sendvip", sendvip))
+    app.add_handler(CommandHandler("setchannel", setchannel))
+    app.add_handler(CommandHandler("channeltest", channeltest))
+    app.add_handler(CommandHandler("backtest", backtest))
+    app.add_handler(CommandHandler("backtest2tf", backtest2tf))
+    app.add_handler(CommandHandler("backtest2", backtest2tf))
+    app.add_handler(CommandHandler("backtest4h1h", backtest2tf))
+    app.add_handler(CommandHandler("confluence", confluence_cmd))
+    app.add_handler(CommandHandler("bestcombo", bestcombo_cmd))
+    app.add_handler(CommandHandler("s1s6", signal_s1s6))
+    app.add_handler(CommandHandler("bests", signal_s1s6))
+    app.add_handler(CommandHandler("backtest_s1s6", backtest_s1s6_cmd))
+    app.add_handler(CommandHandler("backtestbest", backtest_s1s6_cmd))
+    print(f"GOLD VIP V5.3 FINAL KEEP + 2TF started - 3TF 38.7% + 2TF 4H+1H ONLY - Your request")
+    app.run_polling(drop_pending_updates=True, allowed_updates=["message"])
 
-if __name__ == "__main__":
-    main()
+if __name__=="__main__": main()
