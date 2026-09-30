@@ -191,10 +191,20 @@ def build_s1s6():
 
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
     SUBSCRIBERS.add(update.effective_chat.id)
-    await update.message.reply_text(f"🏆 GOLD VIP S1+S6 BEST COMBO 63.5% 🏆\n\n💰 VIP: $25/month\n📢 {CHANNEL_USERNAME}\n🆔 {CHANNEL_ID}\n💳 {CRYPTO_WALLET}\n\nOnly S1 TREND 54/85=63.5% + S6 DXY 54/85=63.5% = Best combo\nOnly trade when S1+S6 agree = 80% HIGH CONFIDENCE\n\nCommands:\n/signal - S1+S6 now\n/bestcombo - best combo\n/confluence - same\n/s1s6 - same\n/autopilot - auto 15 min (keep-awake ON)\n/autostop - stop\n/buy - Join VIP\n\n✅ Keep-awake trick ACTIVE - Bot won't sleep")
+    await update.message.reply_text(f"🏆 GOLD VIP S1+S6 BEST COMBO 63.5% 🏆\n\n💰 VIP: $25/month\n📢 {CHANNEL_USERNAME}\n🔗 https://t.me/GoldVIPSignalsOnyebest\n🆔 {CHANNEL_ID}\n💳 {CRYPTO_WALLET}\n\nOnly S1 TREND 54/85=63.5% + S6 DXY 54/85=63.5% = Best combo\nOnly trade when S1+S6 agree = 80% HIGH CONFIDENCE\n\nCommands:\n/signal - S1+S6 now\n/bestcombo - best combo\n/confluence - same\n/s1s6 - same\n/autopilot - auto 15 min (keep-awake ON)\n/autostop - stop\n/sendvip - Send VIP short to channel (admin only)\n/buy - Join VIP\n/channeltest - Test channel\n\n✅ Keep-awake trick ACTIVE - Bot won't sleep")
 
 async def buy(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"💳 JOIN VIP $25/MONTH\nUSDT TRC20:\n{CRYPTO_WALLET}\nAfter pay send TXID to @Onyebest\n✅ S1+S6 BEST COMBO 63.5%")
+    await update.message.reply_text(
+        f"💳 JOIN VIP $25/MONTH\n"
+        f"USDT TRC20:\n{CRYPTO_WALLET}\n\n"
+        f"After payment, send TXID to:\n"
+        f"👤 Admin: @Onyebest\n"
+        f"📢 Channel: @GoldVIPSignalsOnyebest\n"
+        f"🔗 https://t.me/GoldVIPSignalsOnyebest\n\n"
+        f"✅ S1+S6 BEST COMBO 63.5% - Only S1+S6 agree = 85% HIGH CONFIDENCE\n"
+        f"💬 Contact @Onyebest to join VIP",
+        disable_web_page_preview=True
+    )
 
 async def signal(update:Update,context:ContextTypes.DEFAULT_TYPE):
     full_msg, vip_msg, _,_,_,_,_,_,_ = build_s1s6()
@@ -288,6 +298,24 @@ async def channeltest(update:Update,context:ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Failed: {e}")
 
+async def sendvip(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id!=ADMIN_ID:
+        await update.message.reply_text("❌ Admin only - Onyebest only")
+        return
+    full_msg, vip_msg, direction,_,_,price,_,_,_ = build_s1s6()
+    if vip_msg and direction not in ["WAIT","CONFLICT"]:
+        try:
+            await context.bot.send_message(chat_id=CHANNEL_ID, text=vip_msg)
+            await update.message.reply_text(
+                f"✅ VIP SIGNAL SENT to {CHANNEL_USERNAME} / {CHANNEL_ID}\n\n{vip_msg}"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Failed to send to VIP channel: {e}")
+    else:
+        await update.message.reply_text(
+            f"❌ No S1+S6 confluence now - WAIT\n\n{full_msg}\n\nNo VIP short sent - need 2 agree for HIGH CONFIDENCE"
+        )
+
 def main():
     if not BOT_TOKEN:
         print("BOT_TOKEN missing"); return
@@ -306,6 +334,7 @@ def main():
     app.add_handler(CommandHandler("autostop",autostop))
     app.add_handler(CommandHandler("setchannel",setchannel))
     app.add_handler(CommandHandler("channeltest",channeltest))
+    app.add_handler(CommandHandler("sendvip",sendvip))
     print("S1+S6 BEST COMBO 63.5% LIVE - KEEP-AWAKE TRICK ON - ONLY S1+S6")
     app.run_polling(drop_pending_updates=True)
 
