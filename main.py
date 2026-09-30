@@ -128,6 +128,7 @@ def build_s1s6():
         s6_conf=random.randint(60,72)
 
     now=datetime.now().strftime('%H:%M')
+    # Full message for private users
     lines=[]
     lines.append(f"🏆 S1+S6 BEST COMBO 63.5% - ${price:.2f}")
     lines.append(f"RSI {rsi_val:.1f} Y {yield_val:.2f}% DXY {dxy_val:.2f}")
@@ -138,6 +139,10 @@ def build_s1s6():
     lines.append(f"   Backtest 5D: 54/85 = 63.5% - BEST for Gold")
     lines.append("")
 
+    # VIP short message - ONLY what user wants for VIP channel
+    vip_lines=[]
+    direction="WAIT"
+    emoji="⚪"
     if s1_dir!="WAIT" and s6_dir!="WAIT" and s1_dir==s6_dir:
         direction=s1_dir
         avg_conf=(s1_conf+s6_conf)//2
@@ -153,10 +158,20 @@ def build_s1s6():
         else:
             lines.append(f"SL: {price+8:.2f} TP1: {price-6:.2f} TP2: {price-12:.2f} TP3: {price-18:.2f}")
         lines.append(f"⏰ {now} | S1 TREND {s1_dir} + S6 DXY {s6_dir} = {direction}")
+        # VIP SHORT - ONLY THIS for channel
+        vip_lines.append(f"{emoji} GOLD {direction} NOW")
+        vip_lines.append("")
+        vip_lines.append(f"Entry: {price:.2f}")
+        if direction=="BUY":
+            vip_lines.append(f"SL: {price-8:.2f} TP1: {price+6:.2f} TP2: {price+12:.2f} TP3: {price+18:.2f}")
+        else:
+            vip_lines.append(f"SL: {price+8:.2f} TP1: {price-6:.2f} TP2: {price-12:.2f} TP3: {price-18:.2f}")
+        vip_lines.append(f"⏰ {now} | S1+S6 63.5% BEST COMBO")
     elif s1_dir!="WAIT" and s6_dir!="WAIT" and s1_dir!=s6_dir:
         lines.append(f"❌ CONFLICT: S1 {s1_dir} vs S6 {s6_dir} - WAIT for alignment")
         lines.append(f"S1 TREND 63.5% vs S6 DXY 63.5% disagree")
         lines.append("⏸️ No trade - waiting for S1+S6 agree = HIGH CONFIDENCE")
+        direction="CONFLICT"
     else:
         direction=s1_dir if s1_dir!="WAIT" else s6_dir
         if direction!="WAIT":
@@ -167,8 +182,12 @@ def build_s1s6():
             lines.append(f"Entry: {price:.2f}")
         else:
             lines.append(f"❌ WAIT - No S1/S6 signal")
+            direction="WAIT"
 
-    return "\n".join(lines),direction,0,0,price,yield_val,dxy_val,rsi_val
+    full_msg = "\n".join(lines)
+    vip_msg = "\n".join(vip_lines) if vip_lines else ""
+    return full_msg, vip_msg, direction, 0, 0, price, yield_val, dxy_val, rsi_val
+
 
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
     SUBSCRIBERS.add(update.effective_chat.id)
@@ -178,12 +197,12 @@ async def buy(update:Update,context:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"💳 JOIN VIP $25/MONTH\nUSDT TRC20:\n{CRYPTO_WALLET}\nAfter pay send TXID to @Onyebest\n✅ S1+S6 BEST COMBO 63.5%")
 
 async def signal(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    msg,_,_,_,_,_,_,_=build_s1s6()
-    await update.message.reply_text(msg)
+    full_msg, vip_msg, _,_,_,_,_,_,_ = build_s1s6()
+    await update.message.reply_text(full_msg)
 
 async def bestcombo_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    msg,_,_,_,_,_,_,_=build_s1s6()
-    await update.message.reply_text(msg)
+    full_msg, vip_msg, _,_,_,_,_,_,_ = build_s1s6()
+    await update.message.reply_text(full_msg)
 
 async def autopilot_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
     global AUTOPILOT_ACTIVE, AUTOPILOT_TASK
@@ -227,20 +246,23 @@ async def autopilot_loop(context:ContextTypes.DEFAULT_TYPE):
             if not AUTOPILOT_ACTIVE:
                 break
                 
-            msg,direction,_,_,_,_,_,_=build_s1s6()
-            if "2 agree" in msg and "WAIT" not in direction:
-                print(f"AUTOPILOT ALERT: {direction} - Sending to {len(SUBSCRIBERS)} subscribers + channel")
+            full_msg, vip_msg, direction,_,_,_,_,_,_ = build_s1s6()
+            if "2 agree" in full_msg and "WAIT" not in direction and vip_msg:
+                print(f"AUTOPILOT ALERT: {direction} - Sending VIP short to channel, full to subscribers")
+                # Full breakdown to private subscribers
                 for chat_id in list(SUBSCRIBERS):
                     try:
-                        await context.bot.send_message(chat_id=chat_id,text=f"🤖 S1+S6 AUTOPILOT\n{msg}")
+                        await context.bot.send_message(chat_id=chat_id,text=f"🤖 S1+S6 AUTOPILOT\n{full_msg}")
                     except Exception as e:
                         print(f"Failed send to {chat_id}: {e}")
+                # ONLY short signal to VIP channel - as user requested
                 try:
-                    await context.bot.send_message(chat_id=CHANNEL_ID,text=msg)
+                    await context.bot.send_message(chat_id=CHANNEL_ID,text=vip_msg)
+                    print(f"VIP channel sent short: {vip_msg[:60]}")
                 except Exception as e:
                     print(f"Failed send to channel: {e}")
             else:
-                print(f"Autopilot check: No 2-agree trade - {msg[:50]}")
+                print(f"Autopilot check: No 2-agree trade - {full_msg[:50]}")
                 
         except asyncio.CancelledError:
             print("Autopilot cancelled")
