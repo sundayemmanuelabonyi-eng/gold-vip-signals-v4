@@ -166,7 +166,7 @@ def build_s1s6():
             vip_lines.append(f"SL: {price-8:.2f} TP1: {price+6:.2f} TP2: {price+12:.2f} TP3: {price+18:.2f}")
         else:
             vip_lines.append(f"SL: {price+8:.2f} TP1: {price-6:.2f} TP2: {price-12:.2f} TP3: {price-18:.2f}")
-        vip_lines.append(f"⏰ {now} | S1+S6 63.5% BEST COMBO")
+        vip_lines.append(f"⏰ {now}")
     elif s1_dir!="WAIT" and s6_dir!="WAIT" and s1_dir!=s6_dir:
         lines.append(f"❌ CONFLICT: S1 {s1_dir} vs S6 {s6_dir} - WAIT for alignment")
         lines.append(f"S1 TREND 63.5% vs S6 DXY 63.5% disagree")
@@ -291,7 +291,7 @@ async def setchannel(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
 async def channeltest(update:Update,context:ContextTypes.DEFAULT_TYPE):
     try:
-        await context.bot.send_message(chat_id=CHANNEL_ID,text="✅ S1+S6 BEST COMBO 63.5% Test - Connected! Keep-awake ON")
+        await context.bot.send_message(chat_id=CHANNEL_ID,text="✅ Bot Connected! VIP Channel Ready")
         await update.message.reply_text("✅ Test sent! Keep-awake trick active")
     except Exception as e:
         await update.message.reply_text(f"❌ Failed: {e}")
