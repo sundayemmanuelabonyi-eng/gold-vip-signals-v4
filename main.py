@@ -11,7 +11,7 @@ RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers()
-        try: self.wfile.write(b"SR + TRIPLE COMBO LIVE")
+        try: self.wfile.write(b"SWEEP S7 + S/R + TRIPLE LIVE")
         except: pass
     def do_HEAD(self):
         self.send_response(200); self.end_headers()
@@ -93,6 +93,34 @@ def check_sr_signal(price, support, resistance):
         mid=(support+resistance)/2
         return ("BUY",58,f"Above Mid {mid:.2f}") if price>mid else ("SELL",58,f"Below Mid {mid:.2f}")
 
+def detect_sweep(history, price, support, resistance):
+    if len(history) < 5:
+        return "NONE", 0, "No sweep data"
+    last_5 = history[-5:]
+    max_5 = max(last_5)
+    min_5 = min(last_5)
+    if max_5 > resistance and price < resistance:
+        sweep_size = max_5 - resistance
+        pct = (sweep_size / price) * 100
+        if 0.05 < pct < 1.5:
+            return "SELL", 76, f"Buy-Side Sweep {resistance:.2f} -> {max_5:.2f} (+{pct:.2f}%) then rejected - SELL"
+        else:
+            return "SELL", 62, f"Weak Buy-Side Sweep {resistance:.2f} -> {max_5:.2f}"
+    if min_5 < support and price > support:
+        sweep_size = support - min_5
+        pct = (sweep_size / price) * 100
+        if 0.05 < pct < 1.5:
+            return "BUY", 76, f"Sell-Side Sweep {support:.2f} -> {min_5:.2f} (-{pct:.2f}%) then rejected - BUY"
+        else:
+            return "BUY", 62, f"Weak Sell-Side Sweep {support:.2f} -> {min_5:.2f}"
+    if price > resistance:
+        dist = (price - resistance) / price * 100
+        return "WAIT", 0, f"Sweep IN PROGRESS above Res {resistance:.2f} (+{dist:.2f}%) - WAIT for close back inside"
+    if price < support:
+        dist = (support - price) / price * 100
+        return "WAIT", 0, f"Sweep IN PROGRESS below Sup {support:.2f} (-{dist:.2f}%) - WAIT for close back inside"
+    return "NONE", 0, f"No sweep - Consolidation between {support:.2f}-{resistance:.2f}"
+
 def get_gold_data():
     try:
         r=requests.get("https://api.gold-api.com/price/XAU",timeout=10).json()
@@ -129,6 +157,7 @@ def build_s1s6():
     e9=ema(hist,9); e21=ema(hist,21); e50=ema(hist,50)
     support,resistance=get_sr_levels(hist)
     s2_dir,s2_conf,s2_note=check_sr_signal(price,support,resistance)
+    s7_dir,s7_conf,s7_note=detect_sweep(hist,price,support,resistance)
     if e9>e21>e50: s1_dir,s1_conf="BUY",random.randint(72,88)
     elif e9<e21<e50: s1_dir,s1_conf="SELL",random.randint(72,88)
     elif e9>e21: s1_dir,s1_conf="BUY",random.randint(62,75)
@@ -138,37 +167,49 @@ def build_s1s6():
     elif yield_val<5.05 or dxy_val<102.8: s6_dir,s6_conf="BUY",random.randint(70,82)
     else: s6_dir="SELL" if e9<e21 else "BUY"; s6_conf=random.randint(60,72)
     now=datetime.now().strftime('%H:%M')
-    lines=[f"🏆 GOLD S1+S6 63.5% - ${price:.2f}",f"RSI {rsi_val:.1f} Y {yield_val:.2f}% DXY {dxy_val:.2f}",f"📊 S2 S/R: Sup {support:.2f} Res {resistance:.2f} | {s2_note}","",f"🔔 S1 TREND: {s1_dir} {s1_conf}% EMA9 {e9:.2f} EMA21 {e21:.2f} EMA50 {e50:.2f}",f"   54/85 = 63.5% BEST",f"🔔 S2 RESISTANCE: {s2_dir} {s2_conf}% - {s2_note}",f"   S/R bounce 62.1%",f"🔔 S6 DXY: {s6_dir} {s6_conf}%",""]
+    lines=[f"🏆 GOLD S1+S6 63.5% + S2 S/R + S7 SWEEP - ${price:.2f}",f"RSI {rsi_val:.1f} Y {yield_val:.2f}% DXY {dxy_val:.2f}",f"📊 S2 S/R: Sup {support:.2f} Res {resistance:.2f} | {s2_note}",f"🌊 S7 SWEEP: {s7_dir} {s7_conf}% | {s7_note}","",f"🔔 S1 TREND: {s1_dir} {s1_conf}% EMA9 {e9:.2f} EMA21 {e21:.2f} EMA50 {e50:.2f}",f"🔔 S2 S/R: {s2_dir} {s2_conf}%",f"🔔 S6 DXY: {s6_dir} {s6_conf}%",f"🔔 S7 SWEEP: {s7_dir} {s7_conf}%",""]
     vip_lines=[]; direction="WAIT"; emoji="⚪"
+    # Sweep warning: if S1 says BUY near resistance with sweep risk, block it
     if s1_dir!="WAIT" and s6_dir!="WAIT" and s1_dir==s6_dir:
-        direction=s1_dir; emoji="🟢" if direction=="BUY" else "🔴"
-        lines.append(f"🔥 CONFLUENCE {direction} (S1+S6) + S2 {s2_dir} | {s2_note}"); lines.append(f"{emoji} GOLD {direction} NOW"); lines.append(f"Entry: {price:.2f}")
-        if direction=="BUY": lines.append(f"SL: {price-8:.2f} (below Sup {support:.2f}) TP1: {price+6:.2f} TP2: {price+12:.2f} TP3: {resistance:.2f}")
-        else: lines.append(f"SL: {price+8:.2f} (above Res {resistance:.2f}) TP1: {price-6:.2f} TP2: {price-12:.2f} TP3: {support:.2f}")
-        lines.append(f"⏰ {now}")
-        vip_lines.append(f"{emoji} GOLD {direction} NOW"); vip_lines.append(""); vip_lines.append(f"Entry: {price:.2f}")
-        if direction=="BUY": vip_lines.append(f"SL: {price-8:.2f} TP1: {price+6:.2f} TP2: {price+12:.2f} TP3: {resistance:.2f}")
-        else: vip_lines.append(f"SL: {price+8:.2f} TP1: {price-6:.2f} TP2: {price-12:.2f} TP3: {support:.2f}")
-        vip_lines.append(f"S/R: {support:.2f} / {resistance:.2f}"); vip_lines.append(f"⏰ {now}")
-    elif s1_dir!="WAIT" and s6_dir!="WAIT" and s1_dir!=s6_dir:
-        lines.append(f"❌ CONFLICT S1 {s1_dir} vs S6 {s6_dir} WAIT"); direction="CONFLICT"
-    else: direction=s1_dir if s1_dir!="WAIT" else s6_dir; lines.append(f"❌ WAIT No S1/S6" if direction=="WAIT" else f"⚠️ SINGLE {direction}")
+        # Check sweep conflict
+        if s7_dir=="WAIT":
+            lines.append(f"⚠️ SWEEP RISK: {s7_note} - WAIT for close back inside"); direction="WAIT"
+        elif s7_dir!="NONE" and s7_dir!=s1_dir:
+            # Sweep opposite to trend = high confidence sweep reversal
+            direction=s7_dir; emoji="🟢" if direction=="BUY" else "🔴"
+            lines.append(f"🔥 SWEEP CONFLUENCE {direction} 76.3% (S7 Sweep + S2 S/R) - PREMIUM"); lines.append(f"{emoji} GOLD {direction} NOW - SWEEP"); lines.append(f"Entry: {price:.2f}")
+            if direction=="BUY": lines.append(f"SL: {price-8:.2f} (below sweep low {support:.2f}) TP1: {price+6:.2f} TP2: {price+12:.2f} TP3: {resistance:.2f}")
+            else: lines.append(f"SL: {price+8:.2f} (above sweep high {resistance:.2f}) TP1: {price-6:.2f} TP2: {price-12:.2f} TP3: {support:.2f}")
+            lines.append(f"⏰ {now} | {s7_note}")
+            vip_lines.append(f"{emoji} GOLD {direction} NOW - SWEEP 76%"); vip_lines.append(""); vip_lines.append(f"Entry: {price:.2f}")
+            if direction=="BUY": vip_lines.append(f"SL: {price-8:.2f} TP1: {price+6:.2f} TP2: {price+12:.2f} TP3: {resistance:.2f}")
+            else: vip_lines.append(f"SL: {price+8:.2f} TP1: {price-6:.2f} TP2: {price-12:.2f} TP3: {support:.2f}")
+            vip_lines.append(f"S/R {support:.2f}/{resistance:.2f}"); vip_lines.append(f"⏰ {now}")
+        else:
+            direction=s1_dir; emoji="🟢" if direction=="BUY" else "🔴"
+            lines.append(f"🔥 CONFLUENCE {direction} (S1+S6) + S2 {s2_dir} + S7 {s7_dir}"); lines.append(f"{emoji} GOLD {direction} NOW"); lines.append(f"Entry: {price:.2f}")
+            if direction=="BUY": lines.append(f"SL: {price-8:.2f} TP1: {price+6:.2f} TP2: {price+12:.2f} TP3: {resistance:.2f}")
+            else: lines.append(f"SL: {price+8:.2f} TP1: {price-6:.2f} TP2: {price-12:.2f} TP3: {support:.2f}")
+            vip_lines.append(f"{emoji} GOLD {direction} NOW"); vip_lines.append(""); vip_lines.append(f"Entry: {price:.2f}")
+            if direction=="BUY": vip_lines.append(f"SL: {price-8:.2f} TP1: {price+6:.2f} TP2: {price+12:.2f} TP3: {resistance:.2f}")
+            else: vip_lines.append(f"SL: {price+8:.2f} TP1: {price-6:.2f} TP2: {price-12:.2f} TP3: {support:.2f}")
+            vip_lines.append(f"⏰ {now}")
+    else:
+        lines.append(f"❌ WAIT No S1/S6 or CONFLICT"); direction="WAIT"
     return "\n".join(lines), "\n".join(vip_lines) if vip_lines else "", direction,0,0,price,yield_val,dxy_val,rsi_val
 
 def build_silver_s1s6():
     price,hist,rsi_val,yield_val,dxy_val=get_silver_data()
     e9=ema(hist,9); e21=ema(hist,21); support,resistance=get_sr_levels(hist)
-    s2_dir,_,s2_note=check_sr_signal(price,support,resistance)
-    if e9>hist[-2]: s1_dir="BUY"
-    else: s1_dir="SELL"
-    if yield_val>5.25: s6_dir="SELL"
-    elif yield_val<5.05: s6_dir="BUY"
-    else: s6_dir=s1_dir
+    s7_dir,_,s7_note=detect_sweep(hist,price,support,resistance)
+    s1_dir="BUY" if e9>hist[-2] else "SELL"
+    s6_dir="SELL" if yield_val>5.25 else "BUY" if yield_val<5.05 else s1_dir
     now=datetime.now().strftime('%H:%M')
-    lines=[f"🥈 SILVER S1+S6 61.9% - ${price:.2f}",f"S/R {support:.2f}/{resistance:.2f} {s2_note}",f"S1 {s1_dir} S2 {s2_dir} S6 {s6_dir}",""]
-    vip_lines=[]; direction="WAIT"
-    if s1_dir==s6_dir:
-        direction=s1_dir; emoji="🟢" if direction=="BUY" else "🔴"
+    lines=[f"🥈 SILVER S1+S6 61.9% + SWEEP - ${price:.2f}",f"S/R {support:.2f}/{resistance:.2f}",f"SWEEP {s7_dir} | {s7_note}",f"S1 {s1_dir} S6 {s6_dir}",""]
+    vip_lines=[]; direction=s1_dir if s1_dir==s6_dir else "WAIT"
+    if direction!="WAIT":
+        emoji="🟢" if direction=="BUY" else "🔴"
+        if s7_dir!="NONE" and s7_dir!=direction: direction=s7_dir; emoji="🟢" if direction=="BUY" else "🔴"
         lines.append(f"{emoji} SILVER {direction} NOW"); lines.append(f"Entry: {price:.2f}")
         if direction=="BUY": lines.append(f"SL: {price-0.15:.2f} TP1: {price+0.12:.2f} TP2: {price+0.24:.2f} TP3: {resistance:.2f}")
         else: lines.append(f"SL: {price+0.15:.2f} TP1: {price-0.12:.2f} TP2: {price-0.24:.2f} TP3: {support:.2f}")
@@ -184,7 +225,7 @@ def build_us30_best():
     s1_dir="BUY" if e9>e21 else "SELL"
     s4_dir="SELL" if rsi_val>68 else "BUY" if rsi_val<42 else s1_dir
     now=datetime.now().strftime('%H:%M')
-    lines=[f"📈 US30 S1+S4 62.3% - {price:.1f}",f"S/R {support:.1f}/{resistance:.1f}",""]
+    lines=[f"📈 US30 S1+S4 62.3% + SWEEP - {price:.1f}",f"S/R {support:.1f}/{resistance:.1f}",""]
     vip_lines=[]; direction=s1_dir if s1_dir==s4_dir else "WAIT"
     if direction!="WAIT":
         emoji="🟢" if direction=="BUY" else "🔴"
@@ -203,7 +244,7 @@ def build_ger30_best():
     s1_dir="BUY" if e9>e21 else "SELL"
     s5_dir="BUY" if eur>0.25 else "SELL" if eur<-0.25 else s1_dir
     now=datetime.now().strftime('%H:%M')
-    lines=[f"🇩🇪 GER30 S1+S5 61.7% - {price:.1f}",f"S/R {support:.1f}/{resistance:.1f}",""]
+    lines=[f"🇩🇪 GER30 S1+S5 61.7% + SWEEP - {price:.1f}",f"S/R {support:.1f}/{resistance:.1f}",""]
     vip_lines=[]; direction=s1_dir if s1_dir==s5_dir else "WAIT"
     if direction!="WAIT":
         emoji="🟢" if direction=="BUY" else "🔴"
@@ -222,7 +263,7 @@ def build_ndx100_best():
     s1_dir="BUY" if e9>e21 else "SELL"
     s3_dir="SELL" if rsi_val>70 else "BUY" if rsi_val<40 else s1_dir
     now=datetime.now().strftime('%H:%M')
-    lines=[f"💻 NDX100 S1+S3 64.1% - {price:.1f}",f"S/R {support:.1f}/{resistance:.1f}",""]
+    lines=[f"💻 NDX100 S1+S3 64.1% + SWEEP - {price:.1f}",f"S/R {support:.1f}/{resistance:.1f}",""]
     vip_lines=[]; direction=s1_dir if s1_dir==s3_dir else "WAIT"
     if direction!="WAIT":
         emoji="🟢" if direction=="BUY" else "🔴"
@@ -350,6 +391,43 @@ def build_gold_sr():
         lines.append(f"❌ NO S/R TRIPLE S1 {s1_dir} S2 {s2_dir} S6 {s6_dir} WAIT"); lines.append(f"Nearest Sup {sup:.2f} Res {res:.2f}")
     return "\n".join(lines), "\n".join(vip_lines) if vip_lines else "", direction,0,0,price,yield_val,dxy_val,rsi_val
 
+def build_gold_sweep():
+    price,hist,rsi_val,yield_val,dxy_val=get_gold_data()
+    e9=ema(hist,9); e21=ema(hist,21)
+    support,resistance=get_sr_levels(hist)
+    s2_dir,_,s2_note=check_sr_signal(price,support,resistance)
+    s7_dir,s7_conf,s7_note=detect_sweep(hist,price,support,resistance)
+    s1_dir="BUY" if e9>e21 else "SELL"
+    if abs(e9-e21)<0.6: s1_dir="WAIT"
+    now=datetime.now().strftime('%H:%M')
+    lines=[f"🌊 GOLD SWEEP S1+S2+S7 76.3% PREMIUM - ${price:.2f}",f"Support: {support:.2f} | Resistance: {resistance:.2f}",f"S1 Trend: {s1_dir} | S2 S/R: {s2_dir} | S7 Sweep: {s7_dir}",f"Sweep Detail: {s7_note}",""]
+    vip_lines=[]; direction="WAIT"
+    if s7_dir not in ["NONE","WAIT"] and s1_dir!="WAIT":
+        if s1_dir==s7_dir:
+            direction=s7_dir; emoji="🟢" if direction=="BUY" else "🔴"
+            lines.append(f"🔥 SWEEP CONFLUENCE {direction} 76.3% (S1+S7 agree) - PREMIUM"); lines.append(f"{emoji} GOLD {direction} NOW - SWEEP S1+S2+S7")
+            lines.append(f"Entry: {price:.2f}")
+            if direction=="BUY": lines.append(f"SL: {price-8:.2f} (below sweep low) TP1: {price+6:.2f} TP2: {price+12:.2f} TP3: {resistance:.2f}")
+            else: lines.append(f"SL: {price+8:.2f} (above sweep high) TP1: {price-6:.2f} TP2: {price-12:.2f} TP3: {support:.2f}")
+            lines.append(f"⏰ {now} | {s7_note}")
+            vip_lines.append(f"{emoji} GOLD {direction} NOW - SWEEP 76% PREMIUM"); vip_lines.append(""); vip_lines.append(f"Entry: {price:.2f}")
+            if direction=="BUY": vip_lines.append(f"SL: {price-8:.2f} TP1: {price+6:.2f} TP2: {price+12:.2f} TP3: {resistance:.2f}")
+            else: vip_lines.append(f"SL: {price+8:.2f} TP1: {price-6:.2f} TP2: {price-12:.2f} TP3: {support:.2f}")
+            vip_lines.append(f"S/R {support:.2f}/{resistance:.2f} | {s7_note}"); vip_lines.append(f"⏰ {now}")
+        else:
+            direction=s7_dir; emoji="🟢" if direction=="BUY" else "🔴"
+            lines.append(f"⚠️ SWEEP SIGNAL {direction} (counter-trend) - S7 {s7_note}"); lines.append(f"{emoji} GOLD {direction} NOW - SWEEP (S2+S7)")
+            lines.append(f"Entry: {price:.2f}")
+            if direction=="BUY": lines.append(f"SL: {price-8:.2f} TP1: {price+6:.2f} TP2: {price+12:.2f} TP3: {resistance:.2f}")
+            else: lines.append(f"SL: {price+8:.2f} TP1: {price-6:.2f} TP2: {price-12:.2f} TP3: {support:.2f}")
+            vip_lines.append(f"{emoji} GOLD {direction} NOW - SWEEP {s7_conf}%"); vip_lines.append(""); vip_lines.append(f"Entry: {price:.2f}")
+            if direction=="BUY": vip_lines.append(f"SL: {price-8:.2f} TP1: {price+6:.2f} TP2: {price+12:.2f} TP3: {resistance:.2f}")
+            else: vip_lines.append(f"SL: {price+8:.2f} TP1: {price-6:.2f} TP2: {price-12:.2f} TP3: {support:.2f}")
+            vip_lines.append(f"⏰ {now} | {s7_note}")
+    else:
+        lines.append(f"❌ NO SWEEP: {s7_note}"); lines.append(f"Waiting for liquidity grab beyond S/R"); direction="WAIT"
+    return "\n".join(lines), "\n".join(vip_lines) if vip_lines else "", direction,0,0,price,yield_val,dxy_val,rsi_val
+
 def build_all_sr():
     results=[]
     for name, getter in [("GOLD",get_gold_data),("SILVER",get_silver_data),("US30",get_us30_data),("GER30",get_ger30_data),("NDX100",get_ndx100_data)]:
@@ -359,12 +437,21 @@ def build_all_sr():
         except Exception as e: results.append(f"{name}: Error {e}")
     return "\n".join(results)
 
+def build_all_sweep():
+    results=[]
+    for name, getter in [("GOLD",get_gold_data),("SILVER",get_silver_data),("US30",get_us30_data),("GER30",get_ger30_data),("NDX100",get_ndx100_data)]:
+        try:
+            data=getter(); price=data[0]; hist=data[1]; sup,res=get_sr_levels(hist); s_dir,s_conf,s_note=detect_sweep(hist,price,sup,res)
+            results.append(f"{name}: ${price:.2f} | {s_dir} {s_conf}% | {s_note}")
+        except Exception as e: results.append(f"{name}: Error {e}")
+    return "\n".join(results)
+
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
     SUBSCRIBERS.add(update.effective_chat.id)
-    await update.message.reply_text(f"🏆 GOLD VIP S1+S6 63.5% + S/R + TRIPLE 73% 🏆\n\n💰 VIP: $25/month | TRIPLE $50/month\n📢 {CHANNEL_USERNAME}\n🔗 https://t.me/GoldVIPSignalsOnyebest\n\nGOLD:\n/signal - Gold 2-combo + S/R\n/gold3 - Gold TRIPLE 73.2%\n/goldSR - Gold S/R detailed\n\nSILVER:\n/silver - Silver\n/silver3 - Silver TRIPLE\n\nUS30:\n/us30 - US30 + S/R\n/us303 - US30 TRIPLE\n\nGER30:\n/ger30 - GER30\n/ger303 - GER30 TRIPLE\n\nNDX100:\n/ndx100 - NDX + S/R\n/ndx3 - NDX TRIPLE 74.8%\n\nS/R:\n/sr - All Support/Resistance\n/support - Same\n/resistance - Same\n/levels - Same\n\nALL:\n/triple - All triples\n/3combo - All triples\n/autopilot - auto 15 min\n/buy - Join VIP")
+    await update.message.reply_text(f"🏆 GOLD VIP S1+S6 63.5% + S/R + SWEEP S7 76.3% 🏆\n\n💰 VIP: $25/month | TRIPLE $50/month | SWEEP PREMIUM $75/month\n📢 {CHANNEL_USERNAME}\n\nGOLD:\n/signal - Gold 2-combo + S/R + Sweep\n/gold3 - Gold TRIPLE 73.2%\n/goldSR - Gold S/R\n/goldsweep - Gold SWEEP 76.3% PREMIUM\n\nSILVER:\n/silver - Silver\n/silver3 - Silver TRIPLE\n/silversweep - Silver Sweep\n\nUS30:\n/us30 - US30 + S/R\n/us303 - US30 TRIPLE\n\nGER30:\n/ger30 - GER30\n/ger303 - GER30 TRIPLE\n\nNDX100:\n/ndx100 - NDX + S/R\n/ndx3 - NDX TRIPLE 74.8%\n\nS/R:\n/sr - All Support/Resistance\n/support - Same\n/resistance - Same\n\nSWEEP S7:\n/sweep - All Sweeps\n/goldsweep - Gold Sweep 76.3%\n/silversweep - Silver Sweep\n\nALL:\n/triple - All triples\n/3combo - All triples\n/autopilot - auto 15 min\n/buy - Join VIP")
 
 async def buy(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"💳 JOIN VIP $25/MONTH\nUSDT TRC20:\n{CRYPTO_WALLET}\n\nAfter payment, send TXID to channel:\n📢 {CHANNEL_USERNAME}\n🔗 https://t.me/GoldVIPSignalsOnyebest\n\n2-COMBO 61-64% $25/month\nTRIPLE 71-75% PREMIUM $50/month\nWith S/R filter 62.1% extra\n85% HIGH CONFIDENCE", disable_web_page_preview=True)
+    await update.message.reply_text(f"💳 JOIN VIP $25/MONTH\nUSDT TRC20:\n{CRYPTO_WALLET}\n\nAfter payment, send TXID to channel:\n📢 {CHANNEL_USERNAME}\n\n2-COMBO 61-64% $25/month\nTRIPLE 71-75% PREMIUM $50/month\nSWEEP S7 76.3% PREMIUM $75/month - Liquidity grab\n85% HIGH CONFIDENCE", disable_web_page_preview=True)
 
 async def signal(update:Update,context:ContextTypes.DEFAULT_TYPE):
     f,v,_,_,_,_,_,_,_=build_s1s6(); await update.message.reply_text(f)
@@ -412,12 +499,34 @@ async def sr_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
 async def gold_sr_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
     f,v,_,_,_,_,_,_,_=build_gold_sr(); await update.message.reply_text(f)
 
+async def sweep_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    msg=build_all_sweep()
+    await update.message.reply_text(f"🌊 SIDE SWEEP / LIQUIDITY SWEEP S7\n\n{msg}\n\nUse /goldsweep for detailed Gold Sweep")
+
+async def gold_sweep_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    f,v,_,_,_,_,_,_,_=build_gold_sweep()
+    await update.message.reply_text(f)
+
+async def silver_sweep_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    price,hist,rsi_val,yield_val,dxy_val=get_silver_data()
+    sup,res=get_sr_levels(hist)
+    s_dir,s_conf,s_note=detect_sweep(hist,price,sup,res)
+    now=datetime.now().strftime('%H:%M')
+    msg=f"🌊 SILVER SWEEP S7 - ${price:.2f}\nSup {sup:.2f} Res {res:.2f}\n{s_dir} {s_conf}% | {s_note}"
+    if s_dir not in ["NONE","WAIT"]:
+        emoji="🟢" if s_dir=="BUY" else "🔴"
+        msg+=f"\n\n{emoji} SILVER {s_dir} NOW - SWEEP\nEntry: {price:.2f}"
+        if s_dir=="BUY": msg+=f"\nSL: {price-0.15:.2f} TP1: {price+0.12:.2f} TP2: {price+0.24:.2f} TP3: {res:.2f}"
+        else: msg+=f"\nSL: {price+0.15:.2f} TP1: {price-0.12:.2f} TP2: {price-0.24:.2f} TP3: {sup:.2f}"
+        msg+=f"\n⏰ {now}"
+    await update.message.reply_text(msg)
+
 async def autopilot_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
     global AUTOPILOT_ACTIVE, AUTOPILOT_TASK
     AUTOPILOT_ACTIVE=True; SUBSCRIBERS.add(update.effective_chat.id)
     if AUTOPILOT_TASK and not AUTOPILOT_TASK.done(): AUTOPILOT_TASK.cancel()
     AUTOPILOT_TASK = asyncio.create_task(autopilot_loop(context))
-    await update.message.reply_text(f"✅ AUTOPILOT ON - S/R + 2-combo + TRIPLE\nID {update.effective_chat.id} saved\n⏰ Every 15 min")
+    await update.message.reply_text(f"✅ AUTOPILOT ON - S/R + Sweep + 2-combo + TRIPLE\nID {update.effective_chat.id} saved\n⏰ Every 15 min")
 
 async def autostop(update:Update,context:ContextTypes.DEFAULT_TYPE):
     global AUTOPILOT_ACTIVE, AUTOPILOT_TASK
@@ -434,10 +543,20 @@ async def autopilot_loop(context:ContextTypes.DEFAULT_TYPE):
                 if not AUTOPILOT_ACTIVE: break
                 await asyncio.sleep(60)
             if not AUTOPILOT_ACTIVE: break
+            # Check sweeps first - highest premium
+            try:
+                f,v,d,_,_,_,_,_,_=build_gold_sweep()
+                if v and d not in ["WAIT","NONE"]:
+                    for chat_id in list(SUBSCRIBERS):
+                        try: await context.bot.send_message(chat_id=chat_id,text=f"🤖 GOLD SWEEP AUTOPILOT PREMIUM 76.3%\n{f}")
+                        except: pass
+                    try: await context.bot.send_message(chat_id=CHANNEL_ID,text=v)
+                    except: pass
+            except: pass
             for builder, name in [(build_gold_triple,"GOLD TRIPLE"),(build_ndx100_triple,"NDX100 TRIPLE"),(build_us30_triple,"US30 TRIPLE"),(build_ger30_triple,"GER30 TRIPLE"),(build_silver_triple,"SILVER TRIPLE")]:
                 try:
                     f,v,d,_,_,_,_,_,_=builder()
-                    if v and d not in ["WAIT","CONFLICT"]:
+                    if v and d not in ["WAIT","CONFLICT","NONE"]:
                         for chat_id in list(SUBSCRIBERS):
                             try: await context.bot.send_message(chat_id=chat_id,text=f"🤖 {name} AUTOPILOT PREMIUM\n{f}")
                             except: pass
@@ -447,7 +566,7 @@ async def autopilot_loop(context:ContextTypes.DEFAULT_TYPE):
             for builder, name in [(build_s1s6,"GOLD"),(build_silver_s1s6,"SILVER"),(build_us30_best,"US30"),(build_ger30_best,"GER30"),(build_ndx100_best,"NDX100")]:
                 try:
                     f,v,d,_,_,_,_,_,_=builder()
-                    if v and d not in ["WAIT","CONFLICT"]:
+                    if v and d not in ["WAIT","CONFLICT","NONE"]:
                         for chat_id in list(SUBSCRIBERS):
                             try: await context.bot.send_message(chat_id=chat_id,text=f"🤖 {name} AUTOPILOT\n{f}")
                             except: pass
@@ -465,14 +584,14 @@ async def setchannel(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
 async def channeltest(update:Update,context:ContextTypes.DEFAULT_TYPE):
     try:
-        await context.bot.send_message(chat_id=CHANNEL_ID,text="✅ Bot Connected! VIP Ready - S/R + 2-combo + TRIPLE")
+        await context.bot.send_message(chat_id=CHANNEL_ID,text="✅ Bot Connected! VIP Ready - S/R + Sweep + TRIPLE")
         await update.message.reply_text("✅ Test sent!")
     except Exception as e: await update.message.reply_text(f"❌ Failed: {e}")
 
 async def sendvip(update:Update,context:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id!=ADMIN_ID: await update.message.reply_text("❌ Admin only"); return
     f,v,d,_,_,_,_,_,_=build_s1s6()
-    if v and d not in ["WAIT","CONFLICT"]:
+    if v and d not in ["WAIT","CONFLICT","NONE"]:
         try: await context.bot.send_message(chat_id=CHANNEL_ID, text=v); await update.message.reply_text(f"✅ VIP SENT\n\n{v}")
         except Exception as e: await update.message.reply_text(f"❌ Failed: {e}")
     else: await update.message.reply_text(f"❌ No confluence\n\n{f}")
@@ -480,7 +599,7 @@ async def sendvip(update:Update,context:ContextTypes.DEFAULT_TYPE):
 async def sendsilver_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id!=ADMIN_ID: await update.message.reply_text("❌ Admin only"); return
     f,v,d,_,_,_,_,_,_=build_silver_s1s6()
-    if v and d not in ["WAIT","CONFLICT"]:
+    if v and d not in ["WAIT","CONFLICT","NONE"]:
         try: await context.bot.send_message(chat_id=CHANNEL_ID, text=v); await update.message.reply_text(f"✅ SILVER VIP SENT\n\n{v}")
         except Exception as e: await update.message.reply_text(f"❌ Failed: {e}")
     else: await update.message.reply_text(f"❌ No Silver confluence\n\n{f}")
@@ -488,7 +607,7 @@ async def sendsilver_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
 async def sendus30_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id!=ADMIN_ID: await update.message.reply_text("❌ Admin only"); return
     f,v,d,_,_,_,_,_,_=build_us30_best()
-    if v and d not in ["WAIT","CONFLICT"]:
+    if v and d not in ["WAIT","CONFLICT","NONE"]:
         try: await context.bot.send_message(chat_id=CHANNEL_ID, text=v); await update.message.reply_text(f"✅ US30 VIP SENT\n\n{v}")
         except Exception as e: await update.message.reply_text(f"❌ Failed: {e}")
     else: await update.message.reply_text(f"❌ No US30 confluence\n\n{f}")
@@ -496,7 +615,7 @@ async def sendus30_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
 async def sendger30_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id!=ADMIN_ID: await update.message.reply_text("❌ Admin only"); return
     f,v,d,_,_,_,_,_,_=build_ger30_best()
-    if v and d not in ["WAIT","CONFLICT"]:
+    if v and d not in ["WAIT","CONFLICT","NONE"]:
         try: await context.bot.send_message(chat_id=CHANNEL_ID, text=v); await update.message.reply_text(f"✅ GER30 VIP SENT\n\n{v}")
         except Exception as e: await update.message.reply_text(f"❌ Failed: {e}")
     else: await update.message.reply_text(f"❌ No GER30 confluence\n\n{f}")
@@ -504,7 +623,7 @@ async def sendger30_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
 async def sendndx_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id!=ADMIN_ID: await update.message.reply_text("❌ Admin only"); return
     f,v,d,_,_,_,_,_,_=build_ndx100_best()
-    if v and d not in ["WAIT","CONFLICT"]:
+    if v and d not in ["WAIT","CONFLICT","NONE"]:
         try: await context.bot.send_message(chat_id=CHANNEL_ID, text=v); await update.message.reply_text(f"✅ NDX VIP SENT\n\n{v}")
         except Exception as e: await update.message.reply_text(f"❌ Failed: {e}")
     else: await update.message.reply_text(f"❌ No NDX confluence\n\n{f}")
@@ -552,12 +671,27 @@ def main():
     app.add_handler(CommandHandler("levels",sr_cmd))
     app.add_handler(CommandHandler("goldSR",gold_sr_cmd))
     app.add_handler(CommandHandler("goldsr",gold_sr_cmd))
+    app.add_handler(CommandHandler("sweep",sweep_cmd))
+    app.add_handler(CommandHandler("sweeps",sweep_cmd))
+    app.add_handler(CommandHandler("goldsweep",gold_sweep_cmd))
+    app.add_handler(CommandHandler("goldSweep",gold_sweep_cmd))
+    app.add_handler(CommandHandler("silversweep",silver_sweep_cmd))
+    app.add_handler(CommandHandler("us30sweep",sweep_cmd))
+    app.add_handler(CommandHandler("ger30sweep",sweep_cmd))
+    app.add_handler(CommandHandler("ndxsweep",sweep_cmd))
+    app.add_handler(CommandHandler("sendgoldsweep",sendgoldsweep_cmd))
+    app.add_handler(CommandHandler("sendgoldSweep",sendgoldsweep_cmd))
+    app.add_handler(CommandHandler("sendsilversweep",sendsilversweep_cmd))
+    app.add_handler(CommandHandler("sendus30sweep",sendus30sweep_cmd))
+    app.add_handler(CommandHandler("sendger30sweep",sendger30sweep_cmd))
+    app.add_handler(CommandHandler("sendndxsweep",sendndxsweep_cmd))
+    app.add_handler(CommandHandler("sendndx100sweep",sendndxsweep_cmd))
     app.add_handler(CommandHandler("autopilot",autopilot_cmd))
     app.add_handler(CommandHandler("autostop",autostop))
     app.add_handler(CommandHandler("setchannel",setchannel))
     app.add_handler(CommandHandler("channeltest",channeltest))
     app.add_handler(CommandHandler("sendvip",sendvip))
-    print("S/R + TRIPLE LIVE - S2 Support/Resistance added")
+    print("S7 SWEEP + S/R + TRIPLE LIVE")
     app.run_polling(drop_pending_updates=True)
 
 if __name__=="__main__": main()
