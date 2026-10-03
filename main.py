@@ -267,21 +267,21 @@ def build_mtf_confluence(symbol_name):
     price = tf15["price"]
     now = datetime.now().strftime('%H:%M')
     lines = []
-    lines.append(f"🎯 {symbol_name} 4H→1H→15M MTF")
+    lines.append(f"🎯 {symbol_name} 4H→1H→15M (No Sweep)")
     lines.append(f"💰 {price:.2f} | 4H {tf4['trend']} {tf4['conf']}% | 1H {tf1['bias']} | 15M {tf15['trigger']}")
     lines.append(f"4H: EMA50 {tf4['e50']:.2f} EMA100 {tf4['e100']:.2f} RSI {tf4['rsi']:.1f} S/R {tf4['sup']:.2f}/{tf4['res']:.2f} ATR {tf4['atr']:.2f}")
     lines.append(f"1H: EMA21 {tf1['e21']:.2f} EMA50 {tf1['e50']:.2f} | {tf1['near_sr']} | S/R {tf1['sup']:.2f}/{tf1['res']:.2f} ATR {tf1['atr']:.2f}")
     lines.append(f"15M: EMA9 {tf15['e9']:.2f} EMA21 {tf15['e21']:.2f} RSI {tf15['rsi']:.1f} S/R {tf15['sup']:.2f}/{tf15['res']:.2f} ATR {tf15['atr']:.2f}")
-    lines.append(f"🌊 {tf15['sweep_dir']} {tf15['sweep_conf']}% | {tf15['sweep_note']}")
     lines.append("")
     direction = "WAIT"
     dist_sup_1h = (tf1["price"] - tf1["sup"])/tf1["price"]*100
     dist_res_1h = (tf1["res"] - tf1["price"])/tf1["price"]*100
-    near_1h_sr = dist_sup_1h < 0.6 or dist_res_1h < 0.6
-    bull_confluence = (tf4["trend"] == "BULL" and tf1["bias"] in ["BULL","RANGE"] and tf15["trigger"] == "BUY" and tf15["sweep_dir"] in ["BUY","NONE"] and tf15["rsi"] < 68)
-    bear_confluence = (tf4["trend"] == "BEAR" and tf1["bias"] in ["BEAR","RANGE"] and tf15["trigger"] == "SELL" and tf15["sweep_dir"] in ["SELL","NONE"] and tf15["rsi"] > 32)
-    bull_premium = bull_confluence and tf15["sweep_dir"] == "BUY" and near_1h_sr
-    bear_premium = bear_confluence and tf15["sweep_dir"] == "SELL" and near_1h_sr
+    near_1h_sr = dist_sup_1h < 0.8 or dist_res_1h < 0.8
+    # NO SWEEP - Pure 4H + 1H + 15M EMA/RSI
+    bull_confluence = (tf4["trend"] == "BULL" and tf1["bias"] in ["BULL","RANGE"] and tf15["trigger"] == "BUY" and tf15["rsi"] < 70)
+    bear_confluence = (tf4["trend"] == "BEAR" and tf1["bias"] in ["BEAR","RANGE"] and tf15["trigger"] == "SELL" and tf15["rsi"] > 30)
+    bull_premium = bull_confluence and near_1h_sr
+    bear_premium = bear_confluence and near_1h_sr
     atr_1h = tf1["atr"]
     sl_atr = atr_1h * 1.2
     tp1_atr = atr_1h * 1.8
@@ -290,29 +290,29 @@ def build_mtf_confluence(symbol_name):
     if bull_premium:
         direction = "BUY"
         emoji = "🟢"
-        lines.append(f"🔥🔥 PREMIUM BUY 4H BULL→1H Support→15M Sweep BUY 1:2.5RR")
+        lines.append(f"🔥🔥 PREMIUM BUY 4H BULL→1H Support→15M BUY 1:2.5RR (No Sweep)")
         lines.append(f"{emoji} {symbol_name} BUY NOW")
         lines.append(f"Entry: {price:.2f} SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} TP3: {tf4['res']:.2f} ⏰ {now}")
-        vip_lines.append(f"{emoji} {symbol_name} BUY NOW - MTF PREMIUM 1:2.5RR")
+        vip_lines.append(f"{emoji} {symbol_name} BUY NOW - 4H1H15M PREMIUM 1:2.5RR")
         vip_lines.append("")
         vip_lines.append(f"Entry: {price:.2f}")
         vip_lines.append(f"SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} TP3: {tf4['res']:.2f}")
-        vip_lines.append(f"4H {tf4['trend']}→1H {tf1['bias']}→15M Sweep BUY RR 1:2.5 ⏰ {now}")
+        vip_lines.append(f"4H {tf4['trend']}→1H {tf1['bias']}→15M {tf15['trigger']} RR 1:2.5 ⏰ {now}")
     elif bear_premium:
         direction = "SELL"
         emoji = "🔴"
-        lines.append(f"🔥🔥 PREMIUM SELL 4H BEAR→1H Res→15M Sweep SELL 1:2.5RR")
+        lines.append(f"🔥🔥 PREMIUM SELL 4H BEAR→1H Res→15M SELL 1:2.5RR (No Sweep)")
         lines.append(f"{emoji} {symbol_name} SELL NOW")
         lines.append(f"Entry: {price:.2f} SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} TP3: {tf4['sup']:.2f} ⏰ {now}")
-        vip_lines.append(f"{emoji} {symbol_name} SELL NOW - MTF PREMIUM 1:2.5RR")
+        vip_lines.append(f"{emoji} {symbol_name} SELL NOW - 4H1H15M PREMIUM 1:2.5RR")
         vip_lines.append("")
         vip_lines.append(f"Entry: {price:.2f}")
         vip_lines.append(f"SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} TP3: {tf4['sup']:.2f}")
-        vip_lines.append(f"4H {tf4['trend']}→1H {tf1['bias']}→15M Sweep SELL RR 1:2.5 ⏰ {now}")
+        vip_lines.append(f"4H {tf4['trend']}→1H {tf1['bias']}→15M {tf15['trigger']} RR 1:2.5 ⏰ {now}")
     elif bull_confluence:
         direction = "BUY"
         emoji = "🟢"
-        lines.append(f"🔥 MTF BUY 4H {tf4['trend']}+1H {tf1['bias']}+15M {tf15['trigger']} 1:1.8RR")
+        lines.append(f"🔥 MTF BUY 4H {tf4['trend']}+1H {tf1['bias']}+15M {tf15['trigger']} 1:1.8RR (No Sweep)")
         lines.append(f"{emoji} {symbol_name} BUY NOW Entry: {price:.2f} SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} ⏰ {now}")
         vip_lines.append(f"{emoji} {symbol_name} BUY NOW - MTF 1:1.8RR")
         vip_lines.append("")
@@ -322,7 +322,7 @@ def build_mtf_confluence(symbol_name):
     elif bear_confluence:
         direction = "SELL"
         emoji = "🔴"
-        lines.append(f"🔥 MTF SELL 4H {tf4['trend']}+1H {tf1['bias']}+15M {tf15['trigger']} 1:1.8RR")
+        lines.append(f"🔥 MTF SELL 4H {tf4['trend']}+1H {tf1['bias']}+15M {tf15['trigger']} 1:1.8RR (No Sweep)")
         lines.append(f"{emoji} {symbol_name} SELL NOW Entry: {price:.2f} SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} ⏰ {now}")
         vip_lines.append(f"{emoji} {symbol_name} SELL NOW - MTF 1:1.8RR")
         vip_lines.append("")
@@ -331,7 +331,7 @@ def build_mtf_confluence(symbol_name):
         vip_lines.append(f"⏰ {now}")
     else:
         lines.append(f"❌ WAIT No MTF confluence")
-        lines.append(f"4H {tf4['trend']} | 1H {tf1['bias']} | 15M {tf15['trigger']} Sweep {tf15['sweep_dir']}")
+        lines.append(f"4H {tf4['trend']} | 1H {tf1['bias']} | 15M {tf15['trigger']}")
     return "\n".join(lines), "\n".join(vip_lines), direction, price
 
 # ===== SIMPLIFIED COMMANDS - ONLY 2 COMBOS =====
