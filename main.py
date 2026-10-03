@@ -30,7 +30,7 @@ def keep_awake_trick():
             try: requests.get(f"http://localhost:{PORT}", timeout=5)
             except: pass
             if RENDER_URL:
-                try: requests.get(RENDER_URL, timeout=10)
+                try: requests.get(RENDER_URL, timeout=5)
                 except: pass
         except: time.sleep(60)
 
@@ -111,9 +111,9 @@ def get_real_price_mtf(symbol, interval, fallback):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         yf_interval = {"15m":"15m", "1h":"60m", "4h":"60m"}[interval]
-        range_map = {"15m":"5d", "1h":"10d", "4h":"60d"}
+        range_map = {"15m":"5d", "1h":"5d", "4h":"10d"}
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={yf_interval}&range={range_map[interval]}"
-        r = requests.get(url, headers=headers, timeout=10).json()
+        r = requests.get(url, headers=headers, timeout=5).json()
         result = r['chart']['result'][0]
         closes = result['indicators']['quote'][0]['close']
         high_data = result['indicators']['quote'][0]['high']
@@ -342,45 +342,93 @@ async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
 async def buy(update:Update,context:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"💳 JOIN VIP $25/MONTH\nUSDT TRC20:\n{CRYPTO_WALLET}\n\n2 COMBOS ONLY:\n1. MTF PREMIUM 4H1H15M - RR 1:2.5 Profitable\n2. 4H Trend Filter\n\n📢 {CHANNEL_USERNAME}", disable_web_page_preview=True)
 
+
 async def signal_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    f,v,d,p = build_mtf_confluence("GOLD")
-    await update.message.reply_text(f)
+    try:
+        await update.message.reply_text("⏳ Analyzing GOLD MTF 4H→1H→15M...")
+        f,v,d,p = build_mtf_confluence("GOLD")
+        await update.message.reply_text(f)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error fetching GOLD MTF: {e}\nTrying cache...\n" + build_4h_fallback("GOLD"))
 
-async def mtf_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    msgs=[]
-    for name in SYMBOLS:
-        f,v,d,p = build_mtf_confluence(name)
-        msgs.append(f)
-    await update.message.reply_text("\n\n---\n\n".join(msgs))
-
-async def gold_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    f,v,d,p = build_mtf_confluence("GOLD")
-    await update.message.reply_text(f)
-
-async def silver_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    f,v,d,p = build_mtf_confluence("SILVER")
-    await update.message.reply_text(f)
-
-async def us30_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    f,v,d,p = build_mtf_confluence("US30")
-    await update.message.reply_text(f)
-
-async def ger30_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    f,v,d,p = build_mtf_confluence("GER30")
-    await update.message.reply_text(f)
-
-async def ndx_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    f,v,d,p = build_mtf_confluence("NDX100")
-    await update.message.reply_text(f)
-
-async def tf4_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    lines = ["📊 4H TREND - BOSS"]
-    for name in SYMBOLS:
+def build_4h_fallback(name):
+    try:
         sym, fb = SYMBOLS[name]
         tf4 = analyze_4h(sym, fb)
-        emoji = "🟢" if tf4["trend"]=="BULL" else "🔴" if tf4["trend"]=="BEAR" else "⚪"
-        lines.append(f"{emoji} {name}: {tf4['trend']} {tf4['conf']}% | {tf4['price']:.2f} EMA50 {tf4['e50']:.2f} EMA100 {tf4['e100']:.2f} RSI {tf4['rsi']:.1f}")
-    await update.message.reply_text("\n".join(lines))
+        return f"📊 {name} 4H {tf4['trend']} | Price {tf4['price']:.2f} EMA50 {tf4['e50']:.2f} RSI {tf4['rsi']:.1f}"
+    except Exception as e2:
+        return f"❌ Fallback failed: {e2}"
+
+async def mtf_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.reply_text("⏳ Analyzing ALL markets MTF (5 markets x 3 timeframes = 15 API calls)... may take 20s")
+        msgs=[]
+        for name in SYMBOLS:
+            try:
+                f,v,d,p = build_mtf_confluence(name)
+                msgs.append(f)
+            except Exception as e:
+                msgs.append(f"❌ {name} failed: {e}")
+        await update.message.reply_text("\n\n---\n\n".join(msgs))
+    except Exception as e:
+        await update.message.reply_text(f"❌ MTF error: {e}")
+
+async def gold_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.reply_text("⏳ Analyzing GOLD MTF...")
+        f,v,d,p = build_mtf_confluence("GOLD")
+        await update.message.reply_text(f)
+    except Exception as e:
+        await update.message.reply_text(f"❌ GOLD MTF error: {e}")
+
+async def silver_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.reply_text("⏳ Analyzing SILVER MTF...")
+        f,v,d,p = build_mtf_confluence("SILVER")
+        await update.message.reply_text(f)
+    except Exception as e:
+        await update.message.reply_text(f"❌ SILVER error: {e}")
+
+async def us30_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.reply_text("⏳ Analyzing US30 MTF...")
+        f,v,d,p = build_mtf_confluence("US30")
+        await update.message.reply_text(f)
+    except Exception as e:
+        await update.message.reply_text(f"❌ US30 error: {e}")
+
+async def ger30_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.reply_text("⏳ Analyzing GER30 MTF...")
+        f,v,d,p = build_mtf_confluence("GER30")
+        await update.message.reply_text(f)
+    except Exception as e:
+        await update.message.reply_text(f"❌ GER30 error: {e}")
+
+async def ndx_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.reply_text("⏳ Analyzing NDX100 MTF...")
+        f,v,d,p = build_mtf_confluence("NDX100")
+        await update.message.reply_text(f)
+    except Exception as e:
+        await update.message.reply_text(f"❌ NDX100 error: {e}")
+
+async def tf4_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.reply_text("⏳ Analyzing 4H trends...")
+        lines = ["📊 4H TREND - BOSS"]
+        for name in SYMBOLS:
+            try:
+                sym, fb = SYMBOLS[name]
+                tf4 = analyze_4h(sym, fb)
+                emoji = "🟢" if tf4["trend"]=="BULL" else "🔴" if tf4["trend"]=="BEAR" else "⚪"
+                lines.append(f"{emoji} {name}: {tf4['trend']} {tf4['conf']}% | {tf4['price']:.2f} EMA50 {tf4['e50']:.2f} EMA100 {tf4['e100']:.2f} RSI {tf4['rsi']:.1f}")
+            except Exception as e:
+                lines.append(f"❌ {name} 4H failed: {e}")
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"❌ 4H error: {e}")
+
 
 async def autopilot_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
     global AUTOPILOT_ACTIVE, AUTOPILOT_TASK
@@ -447,7 +495,7 @@ async def sendgoldmtf_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
 def main():
     if not BOT_TOKEN: print("BOT_TOKEN missing"); return
-    try: requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true",timeout=10)
+    try: requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true",timeout=5)
     except: pass
     app=ApplicationBuilder().token(BOT_TOKEN).build()
     # SIMPLIFIED - ONLY 12 COMMANDS
