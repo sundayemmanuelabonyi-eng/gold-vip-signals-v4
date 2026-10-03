@@ -55,11 +55,38 @@ PRICE_CACHE = {}
 CACHE_TIME = {}
 
 def ema(vals, period):
-    if len(vals)<period: return sum(vals)/len(vals)
+    if len(vals) < period:
+        # If not enough data, use SMA of available but with same period weighting
+        return sum(vals[-period:]) / len(vals[-period:]) if vals else 0
     k=2/(period+1)
     ev=sum(vals[:period])/period
     for v in vals[period:]: ev=v*k+ev*(1-k)
     return ev
+
+def get_spot_gold_price():
+    """Get real XAUUSD spot from gold-api to fix futures vs spot disparity"""
+    try:
+        r=requests.get("https://api.gold-api.com/price/XAU",timeout=5).json()
+        p=float(r.get("price",0))
+        if 1000 < p < 10000:
+            return p
+    except: pass
+    try:
+        # Fallback metals API
+        r=requests.get("https://api.metals.live/v1/spot/gold",timeout=5).json()
+        if r and len(r)>0:
+            return float(r[0].get("price",0))
+    except: pass
+    return None
+
+def get_spot_silver_price():
+    try:
+        r=requests.get("https://api.gold-api.com/price/XAG",timeout=5).json()
+        p=float(r.get("price",0))
+        if 10 < p < 100:
+            return p
+    except: pass
+    return None
 
 def rsi(vals, period=14):
     if len(vals)<period+1: return 50.0
@@ -100,7 +127,7 @@ def get_real_price_mtf(symbol, interval, fallback):
         headers = {'User-Agent': 'Mozilla/5.0'}
         # Map interval
         yf_interval = {"15m":"15m", "1h":"60m", "4h":"60m"}[interval]
-        range_map = {"15m":"5d", "1h":"10d", "4h":"20d"}
+        range_map = {"15m":"5d", "1h":"10d", "4h":"60d"}
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={yf_interval}&range={range_map[interval]}"
         r = requests.get(url, headers=headers, timeout=10).json()
         result = r['chart']['result'][0]
@@ -186,15 +213,26 @@ def detect_sweep(history, price, support, resistance):
     return "NONE", 0, f"Consolidation {support:.2f}-{resistance:.2f}"
 
 def analyze_4h(symbol, fallback):
+    # For GOLD/SILVER, use spot price to fix 20$ futures vs spot gap
+    spot_override = None
+    if symbol == "GC=F":
+        spot_override = get_spot_gold_price()
+    elif symbol == "SI=F":
+        spot_override = get_spot_silver_price()
+    
     price, hist, highs, lows = get_real_price_mtf(symbol, "4h", fallback)
+    if spot_override:
+        price = spot_override  # Use real XAUUSD spot, not GC=F futures
+    
     e50 = ema(hist, 50)
-    e200 = ema(hist, 200) if len(hist)>=200 else ema(hist, 50)
+    e100 = ema(hist, 100) if len(hist)>=100 else ema(hist, 50)
+    e200 = e100  # Use 100 as 200 proxy when not enough data
     rsi_val = rsi(hist,14)
-    # 4H Trend logic
-    if price > e50 and e50 > e200 and rsi_val > 48:
+    # 4H Trend logic - fixed EMA50 vs EMA100 (not 200) to avoid same value bug
+    if price > e50 and e50 > e100 and rsi_val > 48:
         trend = "BULL"
         conf = 75 if rsi_val < 70 else 62
-    elif price < e50 and e50 < e200 and rsi_val < 52:
+    elif price < e50 and e50 < e100 and rsi_val < 52:
         trend = "BEAR"
         conf = 75 if rsi_val > 30 else 62
     elif price > e50:
@@ -208,10 +246,17 @@ def analyze_4h(symbol, fallback):
         conf = 0
     sup, res = get_sr_levels(hist, 30)
     atr_val = atr(highs, lows, hist, 14)
-    return {"price":price, "hist":hist, "highs":highs, "lows":lows, "e50":e50, "e200":e200, "rsi":rsi_val, "trend":trend, "conf":conf, "sup":sup, "res":res, "atr":atr_val}
+    return {"price":price, "hist":hist, "highs":highs, "lows":lows, "e50":e50, "e200":e100, "e100":e100, "rsi":rsi_val, "trend":trend, "conf":conf, "sup":sup, "res":res, "atr":atr_val}
 
 def analyze_1h(symbol, fallback):
+    spot_override = None
+    if symbol == "GC=F":
+        spot_override = get_spot_gold_price()
+    elif symbol == "SI=F":
+        spot_override = get_spot_silver_price()
     price, hist, highs, lows = get_real_price_mtf(symbol, "1h", fallback)
+    if spot_override:
+        price = spot_override
     e21 = ema(hist, 21)
     e50 = ema(hist, 50)
     rsi_val = rsi(hist,14)
@@ -235,7 +280,14 @@ def analyze_1h(symbol, fallback):
     return {"price":price, "hist":hist, "highs":highs, "lows":lows, "e21":e21, "e50":e50, "rsi":rsi_val, "bias":bias, "sup":sup, "res":res, "near_sr":near_sr, "atr":atr_val}
 
 def analyze_15m(symbol, fallback):
+    spot_override = None
+    if symbol == "GC=F":
+        spot_override = get_spot_gold_price()
+    elif symbol == "SI=F":
+        spot_override = get_spot_silver_price()
     price, hist, highs, lows = get_real_price_mtf(symbol, "15m", fallback)
+    if spot_override:
+        price = spot_override
     e9 = ema(hist, 9)
     e21 = ema(hist, 21)
     rsi_val = rsi(hist,14)
