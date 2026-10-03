@@ -169,26 +169,6 @@ def get_sr_levels(history, lookback=30):
     res2 = sorted_recent[-3] if len(sorted_recent)>2 else res
     return (sup+sup2)/2, (res+res2)/2
 
-def detect_sweep(history, price, support, resistance):
-    if len(history) < 5:
-        return "NONE", 0, "No data"
-    last_5 = history[-5:]
-    max_5 = max(last_5)
-    min_5 = min(last_5)
-    if max_5 > resistance and price < resistance:
-        pct = (max_5 - resistance) / price * 100
-        if 0.05 < pct < 2.0:
-            return "SELL", 78, f"Buy-Side Sweep {resistance:.2f}->{max_5:.2f} (+{pct:.2f}%) rejected"
-    if min_5 < support and price > support:
-        pct = (support - min_5) / price * 100
-        if 0.05 < pct < 2.0:
-            return "BUY", 78, f"Sell-Side Sweep {support:.2f}->{min_5:.2f} (-{pct:.2f}%) rejected"
-    if price > resistance:
-        return "WAIT", 0, f"Sweep IN PROGRESS above {resistance:.2f} - WAIT"
-    if price < support:
-        return "WAIT", 0, f"Sweep IN PROGRESS below {support:.2f} - WAIT"
-    return "NONE", 0, f"Consolidation {support:.2f}-{resistance:.2f}"
-
 def analyze_4h(symbol, fallback):
     spot_override = None
     if symbol == "GC=F":
@@ -262,14 +242,14 @@ def analyze_15m(symbol, fallback):
     rsi_val = rsi(hist,14)
     sup, res = get_sr_levels(hist, 20)
     atr_val = atr(highs, lows, hist, 14)
-    sweep_dir, sweep_conf, sweep_note = detect_sweep(hist, price, sup, res)
+    # Pure EMA + RSI trigger, no sweep
     if e9 > e21 and rsi_val > 45 and rsi_val < 68:
         trigger = "BUY"
     elif e9 < e21 and rsi_val < 55 and rsi_val > 32:
         trigger = "SELL"
     else:
         trigger = "WAIT"
-    return {"price":price, "hist":hist, "highs":highs, "lows":lows, "e9":e9, "e21":e21, "rsi":rsi_val, "sup":sup, "res":res, "sweep_dir":sweep_dir, "sweep_conf":sweep_conf, "sweep_note":sweep_note, "trigger":trigger, "atr":atr_val}
+    return {"price":price, "hist":hist, "highs":highs, "lows":lows, "e9":e9, "e21":e21, "rsi":rsi_val, "sup":sup, "res":res, "trigger":trigger, "atr":atr_val}
 
 SYMBOLS = {
     "GOLD": ("GC=F", 4162.0),
