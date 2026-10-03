@@ -111,7 +111,7 @@ def get_real_price_mtf(symbol, interval, fallback):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         yf_interval = {"15m":"15m", "1h":"60m", "4h":"60m"}[interval]
-        range_map = {"15m":"5d", "1h":"5d", "4h":"10d"}
+        range_map = {"15m":"5d", "1h":"10d", "4h":"60d"}
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={yf_interval}&range={range_map[interval]}"
         r = requests.get(url, headers=headers, timeout=5).json()
         result = r['chart']['result'][0]
@@ -138,9 +138,11 @@ def get_real_price_mtf(symbol, interval, fallback):
                 high_data = agg_highs
                 low_data = agg_lows
             price = closes[-1]
-            history = closes[-100:] if len(closes)>=100 else closes
-            highs = high_data[-100:] if len(high_data)>=100 else high_data
-            lows = low_data[-100:] if len(low_data)>=100 else low_data
+            # Keep up to 200 for 4H EMA100
+            max_hist = 200 if interval=="4h" else 100
+            history = closes[-max_hist:] if len(closes)>=max_hist else closes
+            highs = high_data[-max_hist:] if len(high_data)>=max_hist else high_data
+            lows = low_data[-max_hist:] if len(low_data)>=max_hist else low_data
             PRICE_CACHE[key] = (price, history, highs, lows)
             CACHE_TIME[key] = now
             return price, history, highs, lows
@@ -217,8 +219,16 @@ def analyze_1h(symbol, fallback):
     dist_sup = (price - sup)/price*100
     dist_res = (res - price)/price*100
     near_sr = None
-    if dist_sup < 0.4: near_sr = f"Near 1H Support {sup:.2f} (+{dist_sup:.2f}%)"
-    elif dist_res < 0.4: near_sr = f"Near 1H Resistance {res:.2f} (-{dist_res:.2f}%)"
+    if abs(dist_sup) < 0.8: 
+        if dist_sup >= 0:
+            near_sr = f"Near 1H Support {sup:.2f} (+{dist_sup:.2f}%)"
+        else:
+            near_sr = f"Below 1H Support {sup:.2f} ({dist_sup:.2f}%)"
+    elif abs(dist_res) < 0.8:
+        if dist_res >= 0:
+            near_sr = f"Near 1H Resistance {res:.2f} (-{dist_res:.2f}%)"
+        else:
+            near_sr = f"Above 1H Resistance {res:.2f} (+{abs(dist_res):.2f}%)"
     else: near_sr = f"Mid 1H {sup:.2f}-{res:.2f}"
     if price > e21 and price > e50:
         bias = "BULL"
