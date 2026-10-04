@@ -170,21 +170,6 @@ def get_real_price_mtf(symbol, interval, fallback):
     print(f"CRITICAL: No data for {key}")
     return None, [], [], []
 
-    except Exception as e:
-        print(f"Yahoo MTF failed {symbol} {interval}: {e}")
-    if key in PRICE_CACHE:
-        return PRICE_CACHE[key]
-    seed = int(now // 90) + hash(key) % 10000
-    random.seed(seed)
-    price = fallback + random.uniform(-3,3)
-    history = [price - (50-i)*0.2 + random.uniform(-0.3,0.3) for i in range(100)]
-    highs = [h + 0.8 for h in history]
-    lows = [l - 0.8 for l in history]
-    random.seed()
-    PRICE_CACHE[key] = (price, history, highs, lows)
-    CACHE_TIME[key] = now
-    return price, history, highs, lows
-
 def get_sr_levels(history, lookback=30):
     # PROPER SWING SR - finds recent swing highs/lows, not just min/max
     if len(history) < 10:
