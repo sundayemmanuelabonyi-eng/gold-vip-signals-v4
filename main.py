@@ -435,67 +435,121 @@ def build_mtf_confluence(symbol_name):
     bear_confluence = (tf4["trend"] == "BEAR" and tf1["bias"] in ["BEAR","RANGE"] and tf15["trigger"] == "SELL" and tf15["rsi"] > 30)
     bull_premium = bull_confluence and near_1h_sr
     bear_premium = bear_confluence and near_1h_sr
+
+    # === STRUCTURE SUPERSEDES ATR - NEW HYBRID LOGIC ===
     atr_1h = tf1["atr"]
-    sl_atr = atr_1h * 1.2
-    tp1_atr = atr_1h * 1.8
-    tp2_atr = atr_1h * 3.0
-    tp3_atr = atr_1h * 4.5  # TP3 = 1:3.75 RR
-    # FIX TP3: ensure TP3 is in trade direction beyond TP2
-    # BUY: TP3 must be > TP2 > Entry
-    buy_tp3_candidate = tf4['res']
-    if buy_tp3_candidate <= price + tp2_atr:  # resistance below or close to TP2
-        buy_tp3 = price + tp3_atr
+    atr_4h = tf4["atr"]
+    # Structure levels
+    sup_1h_struct = tf1["sup"]
+    res_1h_struct = tf1["res"]
+    sup_4h_struct = tf4["sup"]
+    res_4h_struct = tf4["res"]
+    sup_15m_struct = tf15["sup"]
+    res_15m_struct = tf15["res"]
+    
+    buffer = atr_1h * 0.3
+    atr_sl_min = atr_1h * 1.0
+    atr_sl_max = atr_1h * 2.5
+    
+    # BUY SL: below swing lows + buffer, controlled by ATR
+    buy_sl_struct_1h = sup_1h_struct - buffer
+    buy_sl_struct_15m = sup_15m_struct - buffer
+    buy_sl_struct = min(buy_sl_struct_1h, buy_sl_struct_15m)
+    buy_sl_dist_struct = price - buy_sl_struct
+    if buy_sl_dist_struct < atr_sl_min:
+        buy_sl = price - atr_1h * 1.2
+        buy_sl_reason = f"ATR guard (struct {buy_sl_dist_struct:.1f} too tight -> ATR 1.2)"
+    elif buy_sl_dist_struct > atr_sl_max:
+        buy_sl = price - atr_1h * 2.0
+        buy_sl_reason = f"ATR cap (struct {buy_sl_dist_struct:.1f} too wide -> ATR 2.0)"
     else:
-        buy_tp3 = buy_tp3_candidate
-    # SELL: TP3 must be < TP2 < Entry
-    sell_tp3_candidate = tf4['sup']
-    if sell_tp3_candidate >= price - tp2_atr:  # support above or close to TP2 (WRONG side)
-        sell_tp3 = price - tp3_atr
+        buy_sl = buy_sl_struct
+        buy_sl_reason = f"Structure 1H {sup_1h_struct:.2f} / 15M {sup_15m_struct:.2f} + {buffer:.1f} buf"
+    
+    # SELL SL: above swing highs + buffer, controlled by ATR
+    sell_sl_struct_1h = res_1h_struct + buffer
+    sell_sl_struct_15m = res_15m_struct + buffer
+    sell_sl_struct = max(sell_sl_struct_1h, sell_sl_struct_15m)
+    sell_sl_dist_struct = sell_sl_struct - price
+    if sell_sl_dist_struct < atr_sl_min:
+        sell_sl = price + atr_1h * 1.2
+        sell_sl_reason = f"ATR guard (struct {sell_sl_dist_struct:.1f} too tight -> ATR 1.2)"
+    elif sell_sl_dist_struct > atr_sl_max:
+        sell_sl = price + atr_1h * 2.0
+        sell_sl_reason = f"ATR cap (struct {sell_sl_dist_struct:.1f} too wide -> ATR 2.0)"
     else:
-        sell_tp3 = sell_tp3_candidate
+        sell_sl = sell_sl_struct
+        sell_sl_reason = f"Structure 1H {res_1h_struct:.2f} / 15M {res_15m_struct:.2f} + {buffer:.1f} buf"
+    
+    # TPs: Structure first, ATR minimum RR
+    # BUY
+    buy_tp1_struct = min(res_15m_struct, res_1h_struct)
+    buy_tp2_struct = res_1h_struct
+    buy_tp3_struct = res_4h_struct
+    buy_tp1 = buy_tp1_struct if buy_tp1_struct > price + atr_1h*1.5 else price + atr_1h*1.8
+    buy_tp2 = buy_tp2_struct if buy_tp2_struct > price + atr_1h*2.5 and buy_tp2_struct > buy_tp1 else price + atr_1h*3.0
+    buy_tp3 = buy_tp3_struct if buy_tp3_struct > price + atr_1h*4.0 and buy_tp3_struct > buy_tp2 else price + atr_1h*4.5
+    if buy_tp3 <= price + atr_1h*3.0:
+        buy_tp3 = price + atr_1h*4.5
+    
+    # SELL
+    sell_tp1_struct = max(sup_15m_struct, sup_1h_struct)
+    sell_tp2_struct = sup_1h_struct
+    sell_tp3_struct = sup_4h_struct
+    sell_tp1 = sell_tp1_struct if sell_tp1_struct < price - atr_1h*1.5 else price - atr_1h*1.8
+    sell_tp2 = sell_tp2_struct if sell_tp2_struct < price - atr_1h*2.5 and sell_tp2_struct < sell_tp1 else price - atr_1h*3.0
+    sell_tp3 = sell_tp3_struct if sell_tp3_struct < price - atr_1h*4.0 and sell_tp3_struct < sell_tp2 else price - atr_1h*4.5
+    if sell_tp3 >= price - atr_1h*3.0:
+        sell_tp3 = price - atr_1h*4.5
 
     vip_lines = []
     if bull_premium:
         direction = "BUY"
         emoji = "🟢"
-        lines.append(f"🔥🔥 PREMIUM BUY 4H BULL->1H Support->15M BUY 1:2.5RR (No Sweep)")
+        lines.append(f"🔥🔥 PREMIUM BUY 4H BULL->1H Support->15M BUY (Struct>ATR)")
         lines.append(f"{emoji} {symbol_name} BUY NOW")
-        lines.append(f"Entry: {price:.2f} SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} TP3: {buy_tp3:.2f} ⏰ {now}")
-        vip_lines.append(f"{emoji} {symbol_name} BUY NOW - 4H1H15M PREMIUM 1:2.5RR")
+        lines.append(f"Entry: {price:.2f} SL: {buy_sl:.2f} TP1: {buy_tp1:.2f} TP2: {buy_tp2:.2f} TP3: {buy_tp3:.2f} ⏰ {now}")
+        lines.append(f"SL: {buy_sl_reason}")
+        vip_lines.append(f"{emoji} {symbol_name} BUY NOW - STRUCTURE > ATR")
         vip_lines.append("")
         vip_lines.append(f"Entry: {price:.2f}")
-        vip_lines.append(f"SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} TP3: {buy_tp3:.2f}")
-        vip_lines.append(f"4H {tf4['trend']}->1H {tf1['bias']}->15M {tf15['trigger']} RR 1:2.5 ⏰ {now}")
+        vip_lines.append(f"SL: {buy_sl:.2f} ({buy_sl_reason})")
+        vip_lines.append(f"TP1: {buy_tp1:.2f} TP2: {buy_tp2:.2f} TP3: {buy_tp3:.2f}")
+        vip_lines.append(f"4H {tf4['trend']}->1H {tf1['bias']}->15M {tf15['trigger']} ⏰ {now}")
+        vip_lines.append(f"📌 TRAILING: TP1->BE | TP2->TP1 Lock | ATR Trail {atr_1h*1.5:.2f}")
     elif bear_premium:
         direction = "SELL"
         emoji = "🔴"
-        lines.append(f"🔥🔥 PREMIUM SELL 4H BEAR->1H Res->15M SELL 1:2.5RR (No Sweep)")
+        lines.append(f"🔥🔥 PREMIUM SELL 4H BEAR->1H Res->15M SELL (Struct>ATR)")
         lines.append(f"{emoji} {symbol_name} SELL NOW")
-        lines.append(f"Entry: {price:.2f} SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} TP3: {sell_tp3:.2f} ⏰ {now}")
-        vip_lines.append(f"{emoji} {symbol_name} SELL NOW - 4H1H15M PREMIUM 1:2.5RR")
+        lines.append(f"Entry: {price:.2f} SL: {sell_sl:.2f} TP1: {sell_tp1:.2f} TP2: {sell_tp2:.2f} TP3: {sell_tp3:.2f} ⏰ {now}")
+        lines.append(f"SL: {sell_sl_reason}")
+        vip_lines.append(f"{emoji} {symbol_name} SELL NOW - STRUCTURE > ATR")
         vip_lines.append("")
         vip_lines.append(f"Entry: {price:.2f}")
-        vip_lines.append(f"SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} TP3: {sell_tp3:.2f}")
-        vip_lines.append(f"4H {tf4['trend']}->1H {tf1['bias']}->15M {tf15['trigger']} RR 1:2.5 ⏰ {now}")
+        vip_lines.append(f"SL: {sell_sl:.2f} ({sell_sl_reason})")
+        vip_lines.append(f"TP1: {sell_tp1:.2f} TP2: {sell_tp2:.2f} TP3: {sell_tp3:.2f}")
+        vip_lines.append(f"4H {tf4['trend']}->1H {tf1['bias']}->15M {tf15['trigger']} ⏰ {now}")
+        vip_lines.append(f"📌 TRAILING: TP1->BE | TP2->TP1 Lock | ATR Trail {atr_1h*1.5:.2f}")
     elif bull_confluence:
         direction = "BUY"
         emoji = "🟢"
-        lines.append(f"🔥 MTF BUY 4H {tf4['trend']}+1H {tf1['bias']}+15M {tf15['trigger']} 1:1.8RR (No Sweep)")
-        lines.append(f"{emoji} {symbol_name} BUY NOW Entry: {price:.2f} SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} TP3: {buy_tp3:.2f} ⏰ {now}")
-        vip_lines.append(f"{emoji} {symbol_name} BUY NOW - MTF 1:1.8RR")
+        lines.append(f"🔥 MTF BUY 4H {tf4['trend']}+1H {tf1['bias']}+15M {tf15['trigger']} (Struct>ATR)")
+        lines.append(f"{emoji} {symbol_name} BUY NOW Entry: {price:.2f} SL: {buy_sl:.2f} TP1: {buy_tp1:.2f} TP2: {buy_tp2:.2f} TP3: {buy_tp3:.2f} ⏰ {now}")
+        vip_lines.append(f"{emoji} {symbol_name} BUY NOW - MTF Struct>ATR")
         vip_lines.append("")
         vip_lines.append(f"Entry: {price:.2f}")
-        vip_lines.append(f"SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} TP3: {buy_tp3:.2f}")
+        vip_lines.append(f"SL: {buy_sl:.2f} TP1: {buy_tp1:.2f} TP2: {buy_tp2:.2f} TP3: {buy_tp3:.2f}")
         vip_lines.append(f"⏰ {now}")
     elif bear_confluence:
         direction = "SELL"
         emoji = "🔴"
-        lines.append(f"🔥 MTF SELL 4H {tf4['trend']}+1H {tf1['bias']}+15M {tf15['trigger']} 1:1.8RR (No Sweep)")
-        lines.append(f"{emoji} {symbol_name} SELL NOW Entry: {price:.2f} SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} TP3: {sell_tp3:.2f} ⏰ {now}")
-        vip_lines.append(f"{emoji} {symbol_name} SELL NOW - MTF 1:1.8RR")
+        lines.append(f"🔥 MTF SELL 4H {tf4['trend']}+1H {tf1['bias']}+15M {tf15['trigger']} (Struct>ATR)")
+        lines.append(f"{emoji} {symbol_name} SELL NOW Entry: {price:.2f} SL: {sell_sl:.2f} TP1: {sell_tp1:.2f} TP2: {sell_tp2:.2f} TP3: {sell_tp3:.2f} ⏰ {now}")
+        vip_lines.append(f"{emoji} {symbol_name} SELL NOW - MTF Struct>ATR")
         vip_lines.append("")
         vip_lines.append(f"Entry: {price:.2f}")
-        vip_lines.append(f"SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} TP3: {sell_tp3:.2f}")
+        vip_lines.append(f"SL: {sell_sl:.2f} TP1: {sell_tp1:.2f} TP2: {sell_tp2:.2f} TP3: {sell_tp3:.2f}")
         vip_lines.append(f"⏰ {now}")
     else:
         lines.append(f"❌ WAIT No MTF confluence")
@@ -504,9 +558,9 @@ def build_mtf_confluence(symbol_name):
     chart_path = None
     if direction in ["BUY","SELL"]:
         try:
-            sl = price - sl_atr if direction=="BUY" else price + sl_atr
-            tp1 = price + tp1_atr if direction=="BUY" else price - tp1_atr
-            tp2 = price + tp2_atr if direction=="BUY" else price - tp2_atr
+            sl = buy_sl if direction=="BUY" else sell_sl
+            tp1 = buy_tp1 if direction=="BUY" else sell_tp1
+            tp2 = buy_tp2 if direction=="BUY" else sell_tp2
             tp3 = buy_tp3 if direction=="BUY" else sell_tp3
             chart_path = generate_mtf_chart(symbol_name, tf4, tf1, tf15, price, sl, tp1, tp2, direction)
             # SAVE ACTIVE TRADE FOR TRAILING
@@ -524,6 +578,8 @@ def build_mtf_confluence(symbol_name):
         except:
             chart_path = None
     return "\n".join(lines), "\n".join(vip_lines), direction, price, chart_path
+
+
 
 # ===== SIMPLIFIED COMMANDS - ONLY 2 COMBOS =====
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
