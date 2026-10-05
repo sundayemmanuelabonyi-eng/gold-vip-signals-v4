@@ -50,6 +50,7 @@ CHANNEL_USERNAME="@GoldVIPSignalsOnyebest"
 SUBSCRIBERS=set()
 AUTOPILOT_ACTIVE=False
 AUTOPILOT_TASK=None
+ACTIVE_TRADES={}  # {symbol: {entry, sl, tp1, tp2, tp3, direction, trail_sl, status}}
 
 PRICE_CACHE = {}
 CACHE_TIME = {}
@@ -350,6 +351,55 @@ def generate_mtf_chart(symbol_name, tf4, tf1, tf15, price, sl, tp1, tp2, directi
         return None
 
 
+
+def update_trailing_status(symbol_name, current_price):
+    # Check if active trade should trail
+    if symbol_name not in ACTIVE_TRADES:
+        return None
+    t = ACTIVE_TRADES[symbol_name]
+    entry = t['entry']
+    atr = t.get('atr', 15)
+    direction = t['direction']
+    status = t.get('status','OPEN')
+    
+    trail_dist = atr * 1.5
+    msgs = []
+    
+    if direction == "BUY":
+        # TP1 hit?
+        if current_price >= t['tp1'] and status == "OPEN":
+            t['status'] = "TP1_HIT"
+            t['trail_sl'] = entry  # Move SL to BE
+            msgs.append(f"🔒 {symbol_name} BUY TP1 HIT {t['tp1']:.2f}! Move SL to BE {entry:.2f} (Risk Free)")
+        # TP2 hit?
+        if current_price >= t['tp2'] and status in ["OPEN","TP1_HIT"]:
+            t['status'] = "TP2_HIT"
+            t['trail_sl'] = t['tp1']
+            msgs.append(f"🔒🔒 {symbol_name} BUY TP2 HIT {t['tp2']:.2f}! Lock profit, move SL to TP1 {t['tp1']:.2f}")
+        # Trailing after TP2
+        if status == "TP2_HIT":
+            new_trail = current_price - trail_dist
+            if new_trail > t['trail_sl']:
+                t['trail_sl'] = new_trail
+                msgs.append(f"📈 {symbol_name} BUY TRAILING SL now {new_trail:.2f} (+{new_trail-entry:.2f}$ locked)")
+    else: # SELL
+        if current_price <= t['tp1'] and status == "OPEN":
+            t['status'] = "TP1_HIT"
+            t['trail_sl'] = entry
+            msgs.append(f"🔒 {symbol_name} SELL TP1 HIT {t['tp1']:.2f}! Move SL to BE {entry:.2f}")
+        if current_price <= t['tp2'] and status in ["OPEN","TP1_HIT"]:
+            t['status'] = "TP2_HIT"
+            t['trail_sl'] = t['tp1']
+            msgs.append(f"🔒🔒 {symbol_name} SELL TP2 HIT {t['tp2']:.2f}! Lock profit, move SL to TP1 {t['tp1']:.2f}")
+        if status == "TP2_HIT":
+            new_trail = current_price + trail_dist
+            if new_trail < t['trail_sl']:
+                t['trail_sl'] = new_trail
+                msgs.append(f"📉 {symbol_name} SELL TRAILING SL now {new_trail:.2f} (+{entry-new_trail:.2f}$ locked)")
+    
+    ACTIVE_TRADES[symbol_name] = t
+    return "\n".join(msgs) if msgs else None
+
 SYMBOLS = {
     "GOLD": ("GC=F", 4140.52),
     "SILVER": ("SI=F", 32.5),
@@ -389,48 +439,63 @@ def build_mtf_confluence(symbol_name):
     sl_atr = atr_1h * 1.2
     tp1_atr = atr_1h * 1.8
     tp2_atr = atr_1h * 3.0
+    tp3_atr = atr_1h * 4.5  # TP3 = 1:3.75 RR
+    # FIX TP3: ensure TP3 is in trade direction beyond TP2
+    # BUY: TP3 must be > TP2 > Entry
+    buy_tp3_candidate = tf4['res']
+    if buy_tp3_candidate <= price + tp2_atr:  # resistance below or close to TP2
+        buy_tp3 = price + tp3_atr
+    else:
+        buy_tp3 = buy_tp3_candidate
+    # SELL: TP3 must be < TP2 < Entry
+    sell_tp3_candidate = tf4['sup']
+    if sell_tp3_candidate >= price - tp2_atr:  # support above or close to TP2 (WRONG side)
+        sell_tp3 = price - tp3_atr
+    else:
+        sell_tp3 = sell_tp3_candidate
+
     vip_lines = []
     if bull_premium:
         direction = "BUY"
         emoji = "🟢"
-        lines.append(f"🔥🔥 PREMIUM BUY 4H BULL→1H Support→15M BUY 1:2.5RR (No Sweep)")
+        lines.append(f"🔥🔥 PREMIUM BUY 4H BULL->1H Support->15M BUY 1:2.5RR (No Sweep)")
         lines.append(f"{emoji} {symbol_name} BUY NOW")
-        lines.append(f"Entry: {price:.2f} SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} TP3: {tf4['res']:.2f} ⏰ {now}")
+        lines.append(f"Entry: {price:.2f} SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} TP3: {buy_tp3:.2f} ⏰ {now}")
         vip_lines.append(f"{emoji} {symbol_name} BUY NOW - 4H1H15M PREMIUM 1:2.5RR")
         vip_lines.append("")
         vip_lines.append(f"Entry: {price:.2f}")
-        vip_lines.append(f"SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} TP3: {tf4['res']:.2f}")
-        vip_lines.append(f"4H {tf4['trend']}→1H {tf1['bias']}→15M {tf15['trigger']} RR 1:2.5 ⏰ {now}")
+        vip_lines.append(f"SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} TP3: {buy_tp3:.2f}")
+        vip_lines.append(f"4H {tf4['trend']}->1H {tf1['bias']}->15M {tf15['trigger']} RR 1:2.5 ⏰ {now}")
     elif bear_premium:
         direction = "SELL"
         emoji = "🔴"
-        lines.append(f"🔥🔥 PREMIUM SELL 4H BEAR→1H Res→15M SELL 1:2.5RR (No Sweep)")
+        lines.append(f"🔥🔥 PREMIUM SELL 4H BEAR->1H Res->15M SELL 1:2.5RR (No Sweep)")
         lines.append(f"{emoji} {symbol_name} SELL NOW")
-        lines.append(f"Entry: {price:.2f} SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} TP3: {tf4['sup']:.2f} ⏰ {now}")
+        lines.append(f"Entry: {price:.2f} SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} TP3: {sell_tp3:.2f} ⏰ {now}")
         vip_lines.append(f"{emoji} {symbol_name} SELL NOW - 4H1H15M PREMIUM 1:2.5RR")
         vip_lines.append("")
         vip_lines.append(f"Entry: {price:.2f}")
-        vip_lines.append(f"SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} TP3: {tf4['sup']:.2f}")
-        vip_lines.append(f"4H {tf4['trend']}→1H {tf1['bias']}→15M {tf15['trigger']} RR 1:2.5 ⏰ {now}")
+        vip_lines.append(f"SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} TP3: {sell_tp3:.2f}")
+        vip_lines.append(f"4H {tf4['trend']}->1H {tf1['bias']}->15M {tf15['trigger']} RR 1:2.5 ⏰ {now}")
     elif bull_confluence:
         direction = "BUY"
         emoji = "🟢"
         lines.append(f"🔥 MTF BUY 4H {tf4['trend']}+1H {tf1['bias']}+15M {tf15['trigger']} 1:1.8RR (No Sweep)")
-        lines.append(f"{emoji} {symbol_name} BUY NOW Entry: {price:.2f} SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} ⏰ {now}")
+        lines.append(f"{emoji} {symbol_name} BUY NOW Entry: {price:.2f} SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} TP3: {buy_tp3:.2f} ⏰ {now}")
         vip_lines.append(f"{emoji} {symbol_name} BUY NOW - MTF 1:1.8RR")
         vip_lines.append("")
         vip_lines.append(f"Entry: {price:.2f}")
-        vip_lines.append(f"SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} TP3: {tf4['res']:.2f}")
+        vip_lines.append(f"SL: {price-sl_atr:.2f} TP1: {price+tp1_atr:.2f} TP2: {price+tp2_atr:.2f} TP3: {buy_tp3:.2f}")
         vip_lines.append(f"⏰ {now}")
     elif bear_confluence:
         direction = "SELL"
         emoji = "🔴"
         lines.append(f"🔥 MTF SELL 4H {tf4['trend']}+1H {tf1['bias']}+15M {tf15['trigger']} 1:1.8RR (No Sweep)")
-        lines.append(f"{emoji} {symbol_name} SELL NOW Entry: {price:.2f} SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} ⏰ {now}")
+        lines.append(f"{emoji} {symbol_name} SELL NOW Entry: {price:.2f} SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} TP3: {sell_tp3:.2f} ⏰ {now}")
         vip_lines.append(f"{emoji} {symbol_name} SELL NOW - MTF 1:1.8RR")
         vip_lines.append("")
         vip_lines.append(f"Entry: {price:.2f}")
-        vip_lines.append(f"SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} TP3: {tf4['sup']:.2f}")
+        vip_lines.append(f"SL: {price+sl_atr:.2f} TP1: {price-tp1_atr:.2f} TP2: {price-tp2_atr:.2f} TP3: {sell_tp3:.2f}")
         vip_lines.append(f"⏰ {now}")
     else:
         lines.append(f"❌ WAIT No MTF confluence")
@@ -442,7 +507,20 @@ def build_mtf_confluence(symbol_name):
             sl = price - sl_atr if direction=="BUY" else price + sl_atr
             tp1 = price + tp1_atr if direction=="BUY" else price - tp1_atr
             tp2 = price + tp2_atr if direction=="BUY" else price - tp2_atr
+            tp3 = buy_tp3 if direction=="BUY" else sell_tp3
             chart_path = generate_mtf_chart(symbol_name, tf4, tf1, tf15, price, sl, tp1, tp2, direction)
+            # SAVE ACTIVE TRADE FOR TRAILING
+            ACTIVE_TRADES[symbol_name] = {
+                'entry': price,
+                'sl': sl,
+                'tp1': tp1,
+                'tp2': tp2,
+                'tp3': tp3,
+                'direction': direction,
+                'atr': atr_1h,
+                'trail_sl': sl,
+                'status': 'OPEN'
+            }
         except:
             chart_path = None
     return "\n".join(lines), "\n".join(vip_lines), direction, price, chart_path
@@ -582,6 +660,24 @@ async def autopilot_loop(context:ContextTypes.DEFAULT_TYPE):
                 if not AUTOPILOT_ACTIVE: break
                 await asyncio.sleep(60)
             if not AUTOPILOT_ACTIVE: break
+            # Check trailing for active trades every loop
+            for active_name in list(ACTIVE_TRADES.keys()):
+                try:
+                    sym, fb = SYMBOLS[active_name]
+                    pd = get_real_price_mtf(sym, "1h", fb)
+                    cur = pd[0] if pd[0] else fb
+                    if sym == "GC=F":
+                        sp = get_spot_gold_price()
+                        if sp: cur = sp
+                    trail_msg = update_trailing_status(active_name, cur)
+                    if trail_msg:
+                        for chat_id in list(SUBSCRIBERS):
+                            try: await context.bot.send_message(chat_id=chat_id, text=trail_msg)
+                            except: pass
+                        try: await context.bot.send_message(chat_id=CHANNEL_ID, text=trail_msg)
+                        except: pass
+                except: pass
+
             for name in ["GOLD","SILVER","US30","GER30","NDX100"]:
                 try:
                     f,v,d,p,chart = build_mtf_confluence(name)
@@ -628,6 +724,53 @@ async def sendvip(update:Update,context:ContextTypes.DEFAULT_TYPE):
         except Exception as e: await update.message.reply_text(f"❌ Failed: {e}")
     else: await update.message.reply_text(f"❌ No MTF confluence now\n\n{f}")
 
+
+async def trail_cmd(update, context):
+    try:
+        # Check all active trades for trailing updates
+        msgs=[]
+        for sym_name in list(ACTIVE_TRADES.keys()):
+            try:
+                sym, fb = SYMBOLS[sym_name]
+                # get current price
+                price_data = get_real_price_mtf(sym, "1h", fb)
+                if price_data[0] is None:
+                    continue
+                cur_price = price_data[0]
+                # override with spot for gold/silver
+                if sym == "GC=F":
+                    sp = get_spot_gold_price()
+                    if sp: cur_price = sp
+                elif sym == "SI=F":
+                    sp = get_spot_silver_price()
+                    if sp: cur_price = sp
+                msg = update_trailing_status(sym_name, cur_price)
+                if msg:
+                    msgs.append(msg)
+            except Exception as e:
+                msgs.append(f"{sym_name} trail error: {e}")
+        if msgs:
+            await update.message.reply_text("\n\n".join(msgs))
+        else:
+            if not ACTIVE_TRADES:
+                await update.message.reply_text("No active trades to trail. Open a trade with /gold first.")
+            else:
+                await update.message.reply_text("No trailing updates needed yet. Trades still OPEN.")
+    except Exception as e:
+        await update.message.reply_text(f"Trail error: {e}")
+
+async def trail_status_cmd(update, context):
+    try:
+        if not ACTIVE_TRADES:
+            await update.message.reply_text("No active trades.")
+            return
+        lines=["📌 ACTIVE TRADES - TRAILING STATUS"]
+        for name, t in ACTIVE_TRADES.items():
+            lines.append(f"{name} {t['direction']} Entry {t['entry']:.2f} SL {t['trail_sl']:.2f} TP1 {t['tp1']:.2f} TP2 {t['tp2']:.2f} TP3 {t['tp3']:.2f} | {t['status']}")
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"Status error: {e}")
+
 async def sendgoldmtf_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id!=ADMIN_ID: await update.message.reply_text("❌ Admin only"); return
     f,v,d,p,chart = build_mtf_confluence("GOLD")
@@ -659,6 +802,8 @@ def main():
     app.add_handler(CommandHandler("ndx100",ndx_cmd))
     app.add_handler(CommandHandler("nasdaq",ndx_cmd))
     app.add_handler(CommandHandler("4h",tf4_cmd))
+    app.add_handler(CommandHandler("trail",trail_cmd))
+    app.add_handler(CommandHandler("trailstatus",trail_status_cmd))
     app.add_handler(CommandHandler("autopilot",autopilot_cmd))
     app.add_handler(CommandHandler("autostop",autostop))
     app.add_handler(CommandHandler("setchannel",setchannel))
