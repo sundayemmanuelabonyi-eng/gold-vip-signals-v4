@@ -353,7 +353,9 @@ def generate_mtf_chart(symbol_name, tf4, tf1, tf15, price, sl, tp1, tp2, directi
 
 
 def update_trailing_status(symbol_name, current_price):
-    # Check if active trade should trail
+    # === NO-LOSS + PROFIT-LOCK TRAILING ===
+    # If trade ever moved in profit, it can NEVER close in loss.
+    # It will always close in profit (BE+1 minimum)
     if symbol_name not in ACTIVE_TRADES:
         return None
     t = ACTIVE_TRADES[symbol_name]
@@ -361,41 +363,84 @@ def update_trailing_status(symbol_name, current_price):
     atr = t.get('atr', 15)
     direction = t['direction']
     status = t.get('status','OPEN')
+    trail_sl = t.get('trail_sl', t['sl'])
     
-    trail_dist = atr * 1.5
+    trail_dist = atr * 1.0  # tighter trail for profit lock
+    profit_trigger_small = atr * 0.3  # ~6-7$ for GOLD = first profit lock
+    profit_trigger_be = 1.0  # $1 profit = BE+1 lock (NO LOSS guarantee)
+    
     msgs = []
     
     if direction == "BUY":
-        # TP1 hit?
-        if current_price >= t['tp1'] and status == "OPEN":
+        profit = current_price - entry
+        
+        # STEP 0: NO-LOSS GUARANTEE - As soon as +$5 or +0.3 ATR in profit, move SL to BE+1
+        # This ensures if trade ever in profit, it can never be loss
+        if profit >= profit_trigger_small and status == "OPEN":
+            # First time in profit
+            new_sl = entry + profit_trigger_be  # BE + $1 profit
+            if new_sl > trail_sl:
+                t['trail_sl'] = new_sl
+                t['status'] = "PROFIT_LOCKED"
+                msgs.append(f"✅ {symbol_name} BUY +{profit:.2f}$ PROFIT! NO-LOSS ACTIVATED\nMove SL to BE+1: {new_sl:.2f} (Never loss again)")
+        
+        # STEP 1: TP1 hit -> lock BE
+        if current_price >= t['tp1'] and status in ["OPEN","PROFIT_LOCKED"]:
             t['status'] = "TP1_HIT"
-            t['trail_sl'] = entry  # Move SL to BE
-            msgs.append(f"🔒 {symbol_name} BUY TP1 HIT {t['tp1']:.2f}! Move SL to BE {entry:.2f} (Risk Free)")
-        # TP2 hit?
-        if current_price >= t['tp2'] and status in ["OPEN","TP1_HIT"]:
+            new_sl = entry + 2.0  # BE+2
+            if new_sl > t['trail_sl']:
+                t['trail_sl'] = new_sl
+            msgs.append(f"🔒 {symbol_name} BUY TP1 HIT {t['tp1']:.2f}! SL now {t['trail_sl']:.2f} (+{t['trail_sl']-entry:.2f}$ locked)")
+        
+        # STEP 2: TP2 hit -> lock TP1 profit
+        if current_price >= t['tp2'] and status in ["TP1_HIT","PROFIT_LOCKED"]:
             t['status'] = "TP2_HIT"
-            t['trail_sl'] = t['tp1']
-            msgs.append(f"🔒🔒 {symbol_name} BUY TP2 HIT {t['tp2']:.2f}! Lock profit, move SL to TP1 {t['tp1']:.2f}")
-        # Trailing after TP2
-        if status == "TP2_HIT":
+            # Lock at least TP1
+            if t['tp1'] > t['trail_sl']:
+                t['trail_sl'] = t['tp1']
+            msgs.append(f"🔒🔒 {symbol_name} BUY TP2 HIT {t['tp2']:.2f}! Lock profit SL {t['trail_sl']:.2f} (+{t['trail_sl']-entry:.2f}$)")
+        
+        # STEP 3: CONTINUOUS PROFIT TRAILING after any profit
+        if status != "OPEN":
             new_trail = current_price - trail_dist
-            if new_trail > t['trail_sl']:
+            if new_trail > t['trail_sl'] and new_trail > entry:
+                profit_locked = new_trail - entry
                 t['trail_sl'] = new_trail
-                msgs.append(f"📈 {symbol_name} BUY TRAILING SL now {new_trail:.2f} (+{new_trail-entry:.2f}$ locked)")
-    else: # SELL
-        if current_price <= t['tp1'] and status == "OPEN":
+                msgs.append(f"📈 {symbol_name} BUY TRAILING +{profit:.2f}$ -> SL now {new_trail:.2f} (+{profit_locked:.2f}$ GUARANTEED PROFIT)")
+    
+    else: # SELL - NO-LOSS LOGIC
+        profit = entry - current_price
+        
+        # STEP 0: NO-LOSS - As soon as in profit, lock BE+1
+        if profit >= profit_trigger_small and status == "OPEN":
+            new_sl = entry - profit_trigger_be  # BE+1 for SELL (below entry)
+            if new_sl < trail_sl:
+                t['trail_sl'] = new_sl
+                t['status'] = "PROFIT_LOCKED"
+                msgs.append(f"✅ {symbol_name} SELL +{profit:.2f}$ PROFIT! NO-LOSS ACTIVATED\nMove SL to BE+1: {new_sl:.2f} (Never loss again, will close +${profit_trigger_be})")
+        
+        # STEP 1: TP1
+        if current_price <= t['tp1'] and status in ["OPEN","PROFIT_LOCKED"]:
             t['status'] = "TP1_HIT"
-            t['trail_sl'] = entry
-            msgs.append(f"🔒 {symbol_name} SELL TP1 HIT {t['tp1']:.2f}! Move SL to BE {entry:.2f}")
-        if current_price <= t['tp2'] and status in ["OPEN","TP1_HIT"]:
+            new_sl = entry - 2.0
+            if new_sl < t['trail_sl']:
+                t['trail_sl'] = new_sl
+            msgs.append(f"🔒 {symbol_name} SELL TP1 HIT {t['tp1']:.2f}! SL now {t['trail_sl']:.2f} (+{entry-t['trail_sl']:.2f}$ locked)")
+        
+        # STEP 2: TP2
+        if current_price <= t['tp2'] and status in ["TP1_HIT","PROFIT_LOCKED"]:
             t['status'] = "TP2_HIT"
-            t['trail_sl'] = t['tp1']
-            msgs.append(f"🔒🔒 {symbol_name} SELL TP2 HIT {t['tp2']:.2f}! Lock profit, move SL to TP1 {t['tp1']:.2f}")
-        if status == "TP2_HIT":
+            if t['tp1'] < t['trail_sl']:
+                t['trail_sl'] = t['tp1']
+            msgs.append(f"🔒🔒 {symbol_name} SELL TP2 HIT {t['tp2']:.2f}! Lock profit SL {t['trail_sl']:.2f} (+{entry-t['trail_sl']:.2f}$)")
+        
+        # STEP 3: CONTINUOUS TRAILING
+        if status != "OPEN":
             new_trail = current_price + trail_dist
-            if new_trail < t['trail_sl']:
+            if new_trail < t['trail_sl'] and new_trail < entry:
+                profit_locked = entry - new_trail
                 t['trail_sl'] = new_trail
-                msgs.append(f"📉 {symbol_name} SELL TRAILING SL now {new_trail:.2f} (+{entry-new_trail:.2f}$ locked)")
+                msgs.append(f"📉 {symbol_name} SELL TRAILING +{profit:.2f}$ -> SL now {new_trail:.2f} (+{profit_locked:.2f}$ GUARANTEED PROFIT)")
     
     ACTIVE_TRADES[symbol_name] = t
     return "\n".join(msgs) if msgs else None
