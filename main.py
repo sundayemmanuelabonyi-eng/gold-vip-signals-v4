@@ -203,143 +203,227 @@ def get_sr_levels(history, lookback=30):
         sup = min(recent)
     return sup, res
 
+def get_swing_points(highs, lows, left=2, right=2):
+    sh = []; sl = []
+    for i in range(left, len(highs)-right):
+        is_sh = True
+        for j in range(1, left+1):
+            if highs[i] <= highs[i-j]: is_sh=False
+        for j in range(1, right+1):
+            if highs[i] <= highs[i+j]: is_sh=False
+        if is_sh: sh.append((i, highs[i]))
+        is_sl = True
+        for j in range(1, left+1):
+            if lows[i] >= lows[i-j]: is_sl=False
+        for j in range(1, right+1):
+            if lows[i] >= lows[i+j]: is_sl=False
+        if is_sl: sl.append((i, lows[i]))
+    return sh, sl
+
+def detect_bos_choch(hist, highs, lows):
+    sh, sl = get_swing_points(highs, lows, 2, 2)
+    if len(sh) < 2 or len(sl) < 2:
+        return "RANGE", 50, sh, sl, "No clear structure"
+    last_sh = sh[-1][1]; prev_sh = sh[-2][1]
+    last_sl = sl[-1][1]; prev_sl = sl[-2][1]
+    price = hist[-1]
+    # HH/HL and LL/LH
+    hh = last_sh > prev_sh
+    hl = last_sl > prev_sl
+    ll = last_sl < prev_sl
+    lh = last_sh < prev_sh
+    # BOS
+    bos_bull = price > last_sh  # break last swing high
+    bos_bear = price < last_sl  # break last swing low
+    if bos_bull and hh and hl:
+        return "BULL", 85, sh, sl, f"BOS BULL Break {last_sh:.2f} HH/HL"
+    if bos_bear and ll and lh:
+        return "BEAR", 85, sh, sl, f"BOS BEAR Break {last_sl:.2f} LL/LH"
+    if hh and hl:
+        return "BULL", 70, sh, sl, f"Uptrend HH {prev_sh:.2f}->{last_sh:.2f} HL {prev_sl:.2f}->{last_sl:.2f}"
+    if ll and lh:
+        return "BEAR", 70, sh, sl, f"Downtrend LL {prev_sl:.2f}->{last_sl:.2f} LH {prev_sh:.2f}->{last_sh:.2f}"
+    # CHoCH
+    if price > prev_sh and ll:  # CHoCH to bull
+        return "BULL", 65, sh, sl, f"CHoCH BULL {prev_sh:.2f} break"
+    if price < prev_sl and hh:  # CHoCH to bear
+        return "BEAR", 65, sh, sl, f"CHoCH BEAR {prev_sl:.2f} break"
+    return "RANGE", 40, sh, sl, f"Range {last_sl:.2f}-{last_sh:.2f}"
+
+
+def get_swing_points(highs, lows, left=2, right=2):
+    sh = []; sl = []
+    for i in range(left, len(highs)-right):
+        is_sh = all(highs[i] > highs[i-j] for j in range(1, left+1)) and all(highs[i] > highs[i+j] for j in range(1, right+1))
+        if is_sh: sh.append((i, highs[i]))
+        is_sl = all(lows[i] < lows[i-j] for j in range(1, left+1)) and all(lows[i] < lows[i+j] for j in range(1, right+1))
+        if is_sl: sl.append((i, lows[i]))
+    return sh, sl
+
+def detect_bos_choch(hist, highs, lows):
+    sh, sl = get_swing_points(highs, lows, 2, 2)
+    if len(sh) < 2 or len(sl) < 2:
+        return "RANGE", 50, sh, sl, "No clear structure"
+    last_sh = sh[-1][1]; prev_sh = sh[-2][1]
+    last_sl = sl[-1][1]; prev_sl = sl[-2][1]
+    price = hist[-1]
+    hh = last_sh > prev_sh
+    hl = last_sl > prev_sl
+    ll = last_sl < prev_sl
+    lh = last_sh < prev_sh
+    bos_bull = price > last_sh
+    bos_bear = price < last_sl
+    if bos_bull and hh and hl:
+        return "BULL", 85, sh, sl, f"BOS BULL Break {last_sh:.2f} HH/HL"
+    if bos_bear and ll and lh:
+        return "BEAR", 85, sh, sl, f"BOS BEAR Break {last_sl:.2f} LL/LH"
+    if hh and hl:
+        return "BULL", 70, sh, sl, f"Uptrend HH {prev_sh:.2f}->{last_sh:.2f} HL {prev_sl:.2f}->{last_sl:.2f}"
+    if ll and lh:
+        return "BEAR", 70, sh, sl, f"Downtrend LL {prev_sl:.2f}->{last_sl:.2f} LH {prev_sh:.2f}->{last_sh:.2f}"
+    if price > prev_sh and ll:
+        return "BULL", 65, sh, sl, f"CHoCH BULL {prev_sh:.2f} break"
+    if price < prev_sl and hh:
+        return "BEAR", 65, sh, sl, f"CHoCH BEAR {prev_sl:.2f} break"
+    return "RANGE", 40, sh, sl, f"Range {last_sl:.2f}-{last_sh:.2f}"
+
+
+def get_swing_points(highs, lows, left=2, right=2):
+    sh = []; sl = []
+    for i in range(left, len(highs)-right):
+        is_sh = all(highs[i] > highs[i-j] for j in range(1, left+1)) and all(highs[i] > highs[i+j] for j in range(1, right+1))
+        if is_sh: sh.append((i, highs[i]))
+        is_sl = all(lows[i] < lows[i-j] for j in range(1, left+1)) and all(lows[i] < lows[i+j] for j in range(1, right+1))
+        if is_sl: sl.append((i, lows[i]))
+    return sh, sl
+
+def detect_bos_choch(hist, highs, lows):
+    sh, sl = get_swing_points(highs, lows, 2, 2)
+    if len(sh) < 2 or len(sl) < 2:
+        return "RANGE", 50, sh, sl, "No clear structure"
+    last_sh = sh[-1][1]; prev_sh = sh[-2][1]
+    last_sl = sl[-1][1]; prev_sl = sl[-2][1]
+    price = hist[-1]
+    hh = last_sh > prev_sh
+    hl = last_sl > prev_sl
+    ll = last_sl < prev_sl
+    lh = last_sh < prev_sh
+    bos_bull = price > last_sh
+    bos_bear = price < last_sl
+    if bos_bull and hh and hl:
+        return "BULL", 85, sh, sl, f"BOS BULL Break {last_sh:.2f} HH/HL"
+    if bos_bear and ll and lh:
+        return "BEAR", 85, sh, sl, f"BOS BEAR Break {last_sl:.2f} LL/LH"
+    if hh and hl:
+        return "BULL", 70, sh, sl, f"Uptrend HH {prev_sh:.2f}->{last_sh:.2f} HL {prev_sl:.2f}->{last_sl:.2f}"
+    if ll and lh:
+        return "BEAR", 70, sh, sl, f"Downtrend LL {prev_sl:.2f}->{last_sl:.2f} LH {prev_sh:.2f}->{last_sh:.2f}"
+    if price > prev_sh and ll:
+        return "BULL", 65, sh, sl, f"CHoCH BULL {prev_sh:.2f} break"
+    if price < prev_sl and hh:
+        return "BEAR", 65, sh, sl, f"CHoCH BEAR {prev_sl:.2f} break"
+    return "RANGE", 40, sh, sl, f"Range {last_sl:.2f}-{last_sh:.2f}"
+
 def analyze_4h(symbol, fallback):
     spot_override = None
-    if symbol == "GC=F":
-        spot_override = get_spot_gold_price()
-    elif symbol == "SI=F":
-        spot_override = get_spot_silver_price()
+    if symbol == "GC=F": spot_override = get_spot_gold_price()
+    elif symbol == "SI=F": spot_override = get_spot_silver_price()
     result = get_real_price_mtf(symbol, "4h", fallback)
-    if result[0] is None:
-        return None
+    if result[0] is None: return None
     price, hist, highs, lows = result
-    if spot_override:
-        price = spot_override
-    e50 = ema(hist, 50)
-    e100 = ema(hist, 100) if len(hist)>=100 else ema(hist, 50)
-    rsi_val = rsi(hist,14)
-    if price > e50 and e50 > e100 and rsi_val > 48:
-        trend = "BULL"
-        conf = 75 if rsi_val < 70 else 62
-    elif price < e50 and e50 < e100 and rsi_val < 52:
-        trend = "BEAR"
-        conf = 75 if rsi_val > 30 else 62
-    elif price > e50:
-        trend = "BULL"
-        conf = 60
-    elif price < e50:
-        trend = "BEAR"
-        conf = 60
-    else:
-        trend = "RANGE"
-        conf = 0
+    if spot_override: price = spot_override
+    trend, conf, sh, sl, desc = detect_bos_choch(hist, highs, lows)
     sup, res = get_sr_levels(hist, 30)
     atr_val = atr(highs, lows, hist, 14)
-    return {"price":price, "hist":hist, "highs":highs, "lows":lows, "e50":e50, "e100":e100, "rsi":rsi_val, "trend":trend, "conf":conf, "sup":sup, "res":res, "atr":atr_val}
+    ob_high = res; ob_low = sup
+    if sh: ob_high = sh[-1][1]
+    if sl: ob_low = sl[-1][1]
+    return {"price":price, "hist":hist, "highs":highs, "lows":lows, "trend":trend, "conf":conf, "sup":sup, "res":res, "atr":atr_val, "sh":sh, "sl":sl, "desc":desc, "ob_high":ob_high, "ob_low":ob_low}
 
 def analyze_1h(symbol, fallback):
     spot_override = None
-    if symbol == "GC=F":
-        spot_override = get_spot_gold_price()
-    elif symbol == "SI=F":
-        spot_override = get_spot_silver_price()
+    if symbol == "GC=F": spot_override = get_spot_gold_price()
+    elif symbol == "SI=F": spot_override = get_spot_silver_price()
     result = get_real_price_mtf(symbol, "1h", fallback)
-    if result[0] is None:
-        return None
+    if result[0] is None: return None
     price, hist, highs, lows = result
-    if spot_override:
-        price = spot_override
-    e21 = ema(hist, 21)
-    e50 = ema(hist, 50)
-    rsi_val = rsi(hist,14)
+    if spot_override: price = spot_override
+    trend, conf, sh, sl, desc = detect_bos_choch(hist, highs, lows)
     sup, res = get_sr_levels(hist, 50)
     atr_val = atr(highs, lows, hist, 14)
-    dist_sup = (price - sup)/price*100
-    dist_res = (res - price)/price*100
-    near_sr = None
-    if abs(dist_sup) < 0.8: 
-        if dist_sup >= 0:
-            near_sr = f"Near 1H Support {sup:.2f} (+{dist_sup:.2f}%)"
-        else:
-            near_sr = f"Below 1H Support {sup:.2f} ({dist_sup:.2f}%)"
-    elif abs(dist_res) < 0.8:
-        if dist_res >= 0:
-            near_sr = f"Near 1H Resistance {res:.2f} (-{dist_res:.2f}%)"
-        else:
-            near_sr = f"Above 1H Resistance {res:.2f} (+{abs(dist_res):.2f}%)"
-    else: near_sr = f"Mid 1H {sup:.2f}-{res:.2f}"
-    if price > e21 and price > e50:
-        bias = "BULL"
-    elif price < e21 and price < e50:
-        bias = "BEAR"
-    else:
-        bias = "RANGE"
-    return {"price":price, "hist":hist, "highs":highs, "lows":lows, "e21":e21, "e50":e50, "rsi":rsi_val, "bias":bias, "sup":sup, "res":res, "near_sr":near_sr, "atr":atr_val}
+    sweep = "None"
+    if len(highs) >= 20:
+        recent_high = max(highs[-20:-2])
+        recent_low = min(lows[-20:-2])
+        if highs[-2] > recent_high and hist[-1] < recent_high:
+            sweep = f"BEAR Sweep {recent_high:.2f} -> {highs[-2]:.2f} wick then close below"
+        elif lows[-2] < recent_low and hist[-1] > recent_low:
+            sweep = f"BULL Sweep {recent_low:.2f} -> {lows[-2]:.2f} wick then close above"
+    bias = trend
+    near_sr = f"{desc} | Sweep: {sweep}"
+    return {"price":price, "hist":hist, "highs":highs, "lows":lows, "bias":bias, "sup":sup, "res":res, "near_sr":near_sr, "atr":atr_val, "sh":sh, "sl":sl, "desc":desc, "sweep":sweep, "conf":conf}
 
 def analyze_15m(symbol, fallback):
     spot_override = None
-    if symbol == "GC=F":
-        spot_override = get_spot_gold_price()
-    elif symbol == "SI=F":
-        spot_override = get_spot_silver_price()
+    if symbol == "GC=F": spot_override = get_spot_gold_price()
+    elif symbol == "SI=F": spot_override = get_spot_silver_price()
     result = get_real_price_mtf(symbol, "15m", fallback)
-    if result[0] is None:
-        return None
+    if result[0] is None: return None
     price, hist, highs, lows = result
-    if spot_override:
-        price = spot_override
-    e9 = ema(hist, 9)
-    e21 = ema(hist, 21)
-    rsi_val = rsi(hist,14)
+    if spot_override: price = spot_override
+    trend, conf, sh, sl, desc = detect_bos_choch(hist, highs, lows)
     sup, res = get_sr_levels(hist, 20)
     atr_val = atr(highs, lows, hist, 14)
-    # Pure EMA + RSI trigger, no sweep
-    if e9 > e21 and rsi_val > 45 and rsi_val < 68:
+    trigger = "WAIT"
+    if "CHoCH BULL" in desc:
         trigger = "BUY"
-    elif e9 < e21 and rsi_val < 55 and rsi_val > 32:
+    elif "CHoCH BEAR" in desc:
         trigger = "SELL"
     else:
-        trigger = "WAIT"
-    return {"price":price, "hist":hist, "highs":highs, "lows":lows, "e9":e9, "e21":e21, "rsi":rsi_val, "sup":sup, "res":res, "trigger":trigger, "atr":atr_val}
+        if trend == "BULL" and conf >= 70: trigger = "BUY"
+        elif trend == "BEAR" and conf >= 70: trigger = "SELL"
+    fvg = "None"
+    if len(hist) >= 3:
+        if lows[-1] > highs[-3]: fvg = f"BULL FVG {highs[-3]:.2f}-{lows[-1]:.2f}"
+        if highs[-1] < lows[-3]: fvg = f"BEAR FVG {lows[-3]:.2f}-{highs[-1]:.2f}"
+    return {"price":price, "hist":hist, "highs":highs, "lows":lows, "sup":sup, "res":res, "trigger":trigger, "atr":atr_val, "sh":sh, "sl":sl, "desc":desc, "fvg":fvg, "conf":conf}
+
 
 
 def generate_mtf_chart(symbol_name, tf4, tf1, tf15, price, sl, tp1, tp2, direction):
     try:
         fig, axes = plt.subplots(3,1, figsize=(10,8), sharex=False)
-        fig.suptitle(f'{symbol_name} 4H->1H->15M {direction} | Entry {price:.2f} SL {sl:.2f} TP1 {tp1:.2f} TP2 {tp2:.2f}', fontsize=10, fontweight='bold')
-        # 4H
+        fig.suptitle(f'{symbol_name} 4H->1H->15M PA {direction} | Entry {price:.2f} SL {sl:.2f} TP1 {tp1:.2f} TP2 {tp2:.2f}', fontsize=10, fontweight='bold')
         ax = axes[0]
         h4 = tf4['hist'][-80:]
         ax.plot(h4, label='Price', color='black', linewidth=1.2)
-        e50_line = [ema(h4[:i+1], 50) if i>=50 else h4[i] for i in range(len(h4))]
-        # simplified EMA display using actual e50/e100 flat for visibility
-        ax.axhline(tf4['e50'], color='orange', linestyle='--', label=f"EMA50 {tf4['e50']:.2f}")
-        ax.axhline(tf4['e100'], color='red', linestyle='--', label=f"EMA100 {tf4['e100']:.2f}")
         ax.axhline(tf4['sup'], color='green', linestyle=':', label=f"Sup {tf4['sup']:.2f}")
         ax.axhline(tf4['res'], color='green', linestyle=':', label=f"Res {tf4['res']:.2f}")
-        ax.set_title(f"4H {tf4['trend']} RSI {tf4['rsi']:.1f} ATR {tf4['atr']:.2f}")
+        if tf4.get('sh'):
+            for _, v in tf4['sh'][-2:]: ax.axhline(v, color='red', linestyle='--', alpha=0.4)
+        if tf4.get('sl'):
+            for _, v in tf4['sl'][-2:]: ax.axhline(v, color='green', linestyle='--', alpha=0.4)
+        ax.set_title(f"4H {tf4['trend']} {tf4['conf']}% {tf4['desc']}")
         ax.legend(fontsize=7, loc='best')
-        # 1H
         ax = axes[1]
         h1 = tf1['hist'][-80:]
         ax.plot(h1, color='black', linewidth=1.1)
-        ax.axhline(tf1['e21'], color='blue', linestyle='--', label=f"EMA21 {tf1['e21']:.2f}")
-        ax.axhline(tf1['e50'], color='orange', linestyle='--', label=f"EMA50 {tf1['e50']:.2f}")
-        ax.axhline(tf1['sup'], color='green', linestyle=':', label=f"1H Sup {tf1['sup']:.2f}")
-        ax.axhline(tf1['res'], color='red', linestyle=':', label=f"1H Res {tf1['res']:.2f}")
-        ax.set_title(f"1H {tf1['bias']} {tf1['near_sr']} RSI {tf1['rsi']:.1f}")
+        if tf1.get('sh'):
+            for _, v in tf1['sh'][-3:]: ax.axhline(v, color='red', linestyle=':', alpha=0.5)
+        if tf1.get('sl'):
+            for _, v in tf1['sl'][-3:]: ax.axhline(v, color='green', linestyle=':', alpha=0.5)
+        ax.axhline(tf1['sup'], color='green', linestyle=':', label=f"Sup {tf1['sup']:.2f}")
+        ax.axhline(tf1['res'], color='red', linestyle=':', label=f"Res {tf1['res']:.2f}")
+        ax.set_title(f"1H {tf1['bias']} {tf1['desc']} | {tf1['sweep']}")
         ax.legend(fontsize=7, loc='best')
-        # 15M with Entry SL TP
         ax = axes[2]
         h15 = tf15['hist'][-80:]
         ax.plot(h15, color='black', linewidth=1.1)
-        ax.axhline(tf15['e9'], color='cyan', linestyle='--', label=f"EMA9 {tf15['e9']:.2f}")
-        ax.axhline(tf15['e21'], color='blue', linestyle='--', label=f"EMA21 {tf15['e21']:.2f}")
         ax.axhline(price, color='purple', linewidth=1.5, label=f"ENTRY {price:.2f}")
         ax.axhline(sl, color='red', linewidth=1.5, linestyle='-', label=f"SL {sl:.2f}")
         ax.axhline(tp1, color='green', linewidth=1.2, linestyle='-', label=f"TP1 {tp1:.2f}")
         ax.axhline(tp2, color='darkgreen', linewidth=1.2, linestyle='-', label=f"TP2 {tp2:.2f}")
-        ax.set_title(f"15M {tf15['trigger']} RSI {tf15['rsi']:.1f} -> SL {sl:.2f} TP {tp1:.2f}/{tp2:.2f}")
+        ax.set_title(f"15M {tf15['trigger']} {tf15['desc']} FVG:{tf15['fvg']}")
         ax.legend(fontsize=7, loc='best')
         plt.tight_layout(rect=[0,0,1,0.96])
         out_path = f"/tmp/{symbol_name}_mtf_{int(time.time())}.png"
@@ -349,6 +433,9 @@ def generate_mtf_chart(symbol_name, tf4, tf1, tf15, price, sl, tp1, tp2, directi
     except Exception as e:
         print(f"Chart error: {e}")
         return None
+
+
+
 
 
 
@@ -465,21 +552,27 @@ def build_mtf_confluence(symbol_name):
     price = tf15["price"]
     now = datetime.now().strftime('%H:%M')
     lines = []
-    lines.append(f"🎯 {symbol_name} 4H->1H->15M (No Sweep)")
-    lines.append(f"💰 {price:.2f} | 4H {tf4['trend']} {tf4['conf']}% | 1H {tf1['bias']} | 15M {tf15['trigger']}")
-    lines.append(f"4H: EMA50 {tf4['e50']:.2f} EMA100 {tf4['e100']:.2f} RSI {tf4['rsi']:.1f} S/R {tf4['sup']:.2f}/{tf4['res']:.2f} ATR {tf4['atr']:.2f}")
-    lines.append(f"1H: EMA21 {tf1['e21']:.2f} EMA50 {tf1['e50']:.2f} | {tf1['near_sr']} | S/R {tf1['sup']:.2f}/{tf1['res']:.2f} ATR {tf1['atr']:.2f}")
-    lines.append(f"15M: EMA9 {tf15['e9']:.2f} EMA21 {tf15['e21']:.2f} RSI {tf15['rsi']:.1f} S/R {tf15['sup']:.2f}/{tf15['res']:.2f} ATR {tf15['atr']:.2f}")
+    lines.append(f"🎯 {symbol_name} 4H->1H->15M PURE PRICE ACTION")
+    lines.append(f"💰 {price:.2f} | 4H {tf4['trend']} {tf4['conf']}% {tf4['desc']} | 1H {tf1['bias']} {tf1['sweep']} | 15M {tf15['trigger']} {tf15['desc']} FVG:{tf15['fvg']}")
+    lines.append(f"4H: {tf4['desc']} | OB {tf4['ob_low']:.2f}/{tf4['ob_high']:.2f} S/R {tf4['sup']:.2f}/{tf4['res']:.2f} ATR {tf4['atr']:.2f}")
+    lines.append(f"1H: {tf1['near_sr']} | S/R {tf1['sup']:.2f}/{tf1['res']:.2f} ATR {tf1['atr']:.2f}")
+    lines.append(f"15M: {tf15['desc']} | FVG {tf15['fvg']} | S/R {tf15['sup']:.2f}/{tf15['res']:.2f} ATR {tf15['atr']:.2f}")
     lines.append("")
     direction = "WAIT"
-    dist_sup_1h = (tf1["price"] - tf1["sup"])/tf1["price"]*100
-    dist_res_1h = (tf1["res"] - tf1["price"])/tf1["price"]*100
-    near_1h_sr = dist_sup_1h < 0.8 or dist_res_1h < 0.8
-    # NO SWEEP - Pure 4H + 1H + 15M EMA/RSI
-    bull_confluence = (tf4["trend"] == "BULL" and tf1["bias"] in ["BULL","RANGE"] and tf15["trigger"] == "BUY" and tf15["rsi"] < 70)
-    bear_confluence = (tf4["trend"] == "BEAR" and tf1["bias"] in ["BEAR","RANGE"] and tf15["trigger"] == "SELL" and tf15["rsi"] > 30)
-    bull_premium = bull_confluence and near_1h_sr
-    bear_premium = bear_confluence and near_1h_sr
+    # PURE PRICE ACTION CONFLUENCE - No EMA/RSI
+    # Need: 4H BOS + 1H Sweep + 15M CHoCH/FVG
+    bull_sweep = "BULL Sweep" in tf1["sweep"] or "BEAR Sweep" in tf1["sweep"]  # sweep opposite direction is entry
+    bear_sweep = "BEAR Sweep" in tf1["sweep"] or "BULL Sweep" in tf1["sweep"]
+    # For BUY: 4H BULL + 1H BULL sweep (liquidity taken low) + 15M BULL CHoCH/BUY
+    bull_confluence = (tf4["trend"] == "BULL" and tf1["bias"] in ["BULL","RANGE"] and tf15["trigger"] == "BUY")
+    bear_confluence = (tf4["trend"] == "BEAR" and tf1["bias"] in ["BEAR","RANGE"] and tf15["trigger"] == "SELL")
+    # Premium requires sweep
+    bull_premium = bull_confluence and ("BULL Sweep" in tf1["sweep"] or tf4["conf"] >= 70)
+    bear_premium = bear_confluence and ("BEAR Sweep" in tf1["sweep"] or tf4["conf"] >= 70)
+    # Also allow high-conf BOS even without sweep
+    if tf4["conf"] >= 85 and tf15["trigger"] in ["BUY","SELL"]:
+        if tf15["trigger"] == "BUY": bull_premium = True
+        if tf15["trigger"] == "SELL": bear_premium = True
 
     # === STRUCTURE SUPERSEDES ATR - NEW HYBRID LOGIC ===
     atr_1h = tf1["atr"]
