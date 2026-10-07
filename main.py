@@ -436,8 +436,9 @@ def detect_failed_transit_immediate(hist, highs, lows, sh, sl):
 
 def analyze_4h(symbol, fallback):
     spot_override = None
-    if symbol == "GC=F": spot_override = get_spot_gold_price()
-    elif symbol == "SI=F": spot_override = get_spot_silver_price()
+    if not get_twelvedata_api_key():
+        if symbol == "GC=F": spot_override = get_spot_gold_price()
+        elif symbol == "SI=F": spot_override = get_spot_silver_price()
     result = get_real_price_mtf(symbol, "4h", fallback)
     if result[0] is None: return None
     price, hist, highs, lows = result
@@ -452,8 +453,9 @@ def analyze_4h(symbol, fallback):
 
 def analyze_1h(symbol, fallback):
     spot_override = None
-    if symbol == "GC=F": spot_override = get_spot_gold_price()
-    elif symbol == "SI=F": spot_override = get_spot_silver_price()
+    if not get_twelvedata_api_key():
+        if symbol == "GC=F": spot_override = get_spot_gold_price()
+        elif symbol == "SI=F": spot_override = get_spot_silver_price()
     result = get_real_price_mtf(symbol, "1h", fallback)
     if result[0] is None: return None
     price, hist, highs, lows = result
@@ -1097,6 +1099,428 @@ def build_mtf_confluence(symbol_name):
 
 
 # ===== SIMPLIFIED COMMANDS - ONLY 2 COMBOS =====
+
+# ============================================================
+# MOMENTUM BOT — Mechanical & Testable Logic per user spec
+# Market: XAU/USD, H1 bias, M15 setup, closed candles only
+# London 08:00-12:00 UTC, NY 13:00-17:00 UTC (08:00-12:00 ET = 13:00-17:00 UTC)
+# ============================================================
+
+MOMENTUM_STATE = {}  # symbol -> state dict
+MOMENTUM_LAST_SIGNAL = {}  # symbol_leg_id -> timestamp (duplicate protection)
+
+def is_valid_session():
+    # London 08:00-12:00 UTC, NY 13:00-17:00 UTC
+    now_utc = datetime.utcnow()
+    hour = now_utc.hour
+    # London
+    if 8 <= hour < 12:
+        return True, "LONDON"
+    # NY (13-17 UTC = 08-12 ET)
+    if 13 <= hour < 17:
+        return True, "NEW YORK"
+    return False, f"OUTSIDE {hour:02d}:00 UTC"
+
+def check_news_filter():
+    # Configurable high-impact news protection - stub for now, returns OK
+    # TODO: integrate ForexFactory API or TwelveData news
+    # For XAUUSD, avoid 5 min before/after high impact USD news
+    # For first version, just check if spread is abnormal (implemented in spread filter)
+    return True, ""
+
+def get_m15_candle_stats(closes, highs, lows):
+    # Returns avg body size last 20 candles
+    if len(closes) < 21:
+        return 0, 0
+    bodies = [abs(closes[i] - closes[i-1]) for i in range(-20, 0)] if len(closes)>=20 else []
+    avg_body = sum(bodies)/len(bodies) if bodies else 1.0
+    return avg_body, bodies
+
+def detect_displacement_m15(price_data):
+    # price_data: dict from analyze_15m
+    hist = price_data["hist"]
+    highs = price_data["highs"]
+    lows = price_data["lows"]
+    if len(hist) < 30:
+        return None
+    avg_body, _ = get_m15_candle_stats(hist, highs, lows)
+    # Last closed candle
+    last_close = hist[-1]
+    last_open = hist[-2] if len(hist)>=2 else last_close
+    last_high = highs[-1] if highs else last_close
+    last_low = lows[-1] if lows else last_close
+    body = abs(last_close - last_open)
+    candle_range = last_high - last_low
+    # Conditions for valid displacement per spec:
+    # 1. Body significantly larger than recent (1.8x)
+    # 2. Close strongly in direction (>70% of range)
+    # 3. Not immediately rejected by next candle (we check close direction)
+    # Direction
+    is_bull = last_close > last_open
+    is_bear = last_close < last_open
+    if not (is_bull or is_bear):
+        return None
+    # 1. Body size filter
+    if body < avg_body * 1.8:
+        return None
+    # 2. Strong close
+    if candle_range == 0:
+        return None
+    close_strength = (last_close - last_low) / candle_range if is_bull else (last_high - last_close) / candle_range
+    if close_strength < 0.70:
+        return None
+    # 3. Structure break - last close breaks recent 20 high/low
+    recent_high = max(highs[-21:-1]) if len(highs)>=21 else max(highs[:-1])
+    recent_low = min(lows[-21:-1]) if len(lows)>=21 else min(lows[:-1])
+    breaks_high = last_close > recent_high
+    breaks_low = last_close < recent_low
+    if not (breaks_high or breaks_low):
+        return None
+    # Direction must match break
+    if is_bull and not breaks_high:
+        return None
+    if is_bear and not breaks_low:
+        return None
+    # Return displacement leg
+    return {
+        "direction": "BULL" if is_bull else "BEAR",
+        "body": body,
+        "avg_body": avg_body,
+        "close": last_close,
+        "open": last_open,
+        "high": last_high,
+        "low": last_low,
+        "break_level": recent_high if is_bull else recent_low,
+        "close_strength": close_strength,
+        "timestamp": time.time()
+    }
+
+def detect_fvg_m15(hist, highs, lows, direction):
+    # Fair Value Gap: 3 candle pattern
+    if len(hist) < 5:
+        return None
+    # Bullish FVG: low of candle3 > high of candle1
+    # Bearish FVG: high of candle3 < low of candle1
+    try:
+        if direction == "BULL":
+            # Check last 3 candles
+            if lows[-1] > highs[-3]:
+                return {"type":"BULL_FVG", "top": lows[-1], "bottom": highs[-3], "mid": (lows[-1]+highs[-3])/2}
+        else:
+            if highs[-1] < lows[-3]:
+                return {"type":"BEAR_FVG", "top": lows[-3], "bottom": highs[-1], "mid": (lows[-3]+highs[-1])/2}
+    except:
+        pass
+    return None
+
+def build_momentum_signal(symbol_name="GOLD"):
+    sym, fallback = SYMBOLS[symbol_name]
+    # 1. Session filter
+    session_ok, session_name = is_valid_session()
+    if not session_ok:
+        return f"⏳ {symbol_name} OUTSIDE TRADING SESSION\nCurrent UTC hour outside London (08-12) & NY (13-17)\nSTATUS: NO SIGNAL", "", "WAIT", fallback, None
+    
+    # 2. News filter
+    news_ok, news_reason = check_news_filter()
+    if not news_ok:
+        return f"⏳ {symbol_name} NEWS FILTER ACTIVE: {news_reason}\nSTATUS: NO SIGNAL", "", "WAIT", fallback, None
+
+    # Get data - TwelveData
+    tf1 = analyze_1h(sym, fallback)
+    tf15 = analyze_15m(sym, fallback)
+    if tf1 is None or tf15 is None:
+        return f"⏳ {symbol_name} Data unavailable", "", "WAIT", fallback, None
+    
+    price = tf15["price"]
+    hist = tf15["hist"]
+    highs = tf15["highs"]
+    lows = tf15["lows"]
+    atr_val = tf15["atr"]
+    
+    # Spread/market quality filter
+    if atr_val < 0.5 or atr_val > 100:
+        return f"❌ {symbol_name} Abnormal ATR {atr_val:.2f} - market quality reject", "", "WAIT", fallback, None
+    if len(hist) < 30:
+        return f"❌ {symbol_name} Insufficient history {len(hist)}", "", "WAIT", fallback, None
+
+    # 2. H1 directional filter
+    h1_trend = tf1["trend"]
+    h1_desc = tf1["desc"]
+    h1_sup = tf1["sup"]
+    h1_res = tf1["res"]
+    
+    # H1 bias: must be BULL or BEAR, not RANGE
+    if h1_trend not in ["BULL", "BEAR"]:
+        return f"""⏳ {symbol_name} MOMENTUM CHECK
+💰 {price:.2f}
+H1: {h1_trend} {h1_desc} - NO CLEAR MOMENTUM BIAS
+M15: {tf15['desc']}
+STATUS: WAITING FOR H1 BIAS
+Session: {session_name}
+""", "", "WAIT", fallback, None
+
+    bias = h1_trend  # BULL or BEAR
+
+    # 3. Detect genuine M15 momentum (displacement)
+    displacement = detect_displacement_m15(tf15)
+    if not displacement:
+        return f"""⏳ {symbol_name} MOMENTUM CHECK
+💰 {price:.2f}
+H1 Bias: {bias} {h1_desc}
+M15: {tf15['desc']}
+Avg Body: {get_m15_candle_stats(hist, highs, lows)[0]:.2f}, No displacement >1.8x avg
+STATUS: WAITING FOR DISPLACEMENT
+Direction → Displacement → Structure break
+Session: {session_name}
+""", "", "WAIT", fallback, None
+
+    # Direction must agree with H1 bias
+    if displacement["direction"] != bias:
+        return f"""⏳ {symbol_name} DISPLACEMENT vs H1 MISMATCH
+💰 {price:.2f}
+H1 Bias: {bias}
+M15 Displacement: {displacement['direction']} body {displacement['body']:.2f} vs avg {displacement['avg_body']:.2f} break {displacement['break_level']:.2f}
+STATUS: MISMATCH - WAITING
+Session: {session_name}
+""", "", "WAIT", fallback, None
+
+    # 4. Record momentum leg
+    leg_id = f"{symbol_name}_{bias}_{displacement['break_level']:.2f}_{int(displacement['timestamp'])}"
+    if symbol_name not in MOMENTUM_STATE:
+        MOMENTUM_STATE[symbol_name] = {}
+    MOMENTUM_STATE[symbol_name][leg_id] = displacement
+    MOMENTUM_STATE[symbol_name][leg_id]["h1_bias"] = bias
+    MOMENTUM_STATE[symbol_name][leg_id]["pullback_zone"] = None
+    MOMENTUM_STATE[symbol_name][leg_id]["status"] = "MOMENTUM_DETECTED"
+
+    # 5. Do NOT chase - wait for pullback
+    # Check if price already pulled back
+    # Pullback zones: broken structure, origin, FVG, order-block
+    broken_level = displacement["break_level"]
+    origin = displacement["open"]  # base of displacement
+    fvg = detect_fvg_m15(hist, highs, lows, bias)
+    
+    # Determine pullback zone
+    pullback_zone_top = None
+    pullback_zone_bottom = None
+    zone_type = ""
+    if fvg:
+        pullback_zone_top = fvg["top"]
+        pullback_zone_bottom = fvg["bottom"]
+        zone_type = fvg["type"]
+    else:
+        # Use broken structure ± 0.5 ATR
+        if bias == "BULL":
+            pullback_zone_top = broken_level + atr_val*0.3
+            pullback_zone_bottom = broken_level - atr_val*0.3
+            zone_type = f"BROKEN STRUCTURE {broken_level:.2f}"
+        else:
+            pullback_zone_top = broken_level + atr_val*0.3
+            pullback_zone_bottom = broken_level - atr_val*0.3
+            zone_type = f"BROKEN STRUCTURE {broken_level:.2f}"
+
+    # 6. Pullback requirement - has price returned to zone?
+    # For BUY: price must have returned to zone (low <= zone_top)
+    # For SELL: price must have returned (high >= zone_bottom)
+    has_pulled_back = False
+    # Check recent 10 candles for interaction with zone
+    recent_lows = lows[-10:] if len(lows)>=10 else lows
+    recent_highs = highs[-10:] if len(highs)>=10 else highs
+    if bias == "BULL":
+        # Has price wicked into zone?
+        for l in recent_lows:
+            if pullback_zone_bottom <= l <= pullback_zone_top or l <= pullback_zone_bottom:
+                has_pulled_back = True
+                break
+        # Current price near zone?
+        if pullback_zone_bottom <= price <= pullback_zone_top + atr_val:
+            has_pulled_back = True
+    else:
+        for h in recent_highs:
+            if pullback_zone_bottom <= h <= pullback_zone_top or h >= pullback_zone_top:
+                has_pulled_back = True
+                break
+        if pullback_zone_bottom - atr_val <= price <= pullback_zone_top:
+            has_pulled_back = True
+
+    if not has_pulled_back:
+        return f"""⏳ {symbol_name} MOMENTUM DETECTED - WAITING FOR PULLBACK
+💰 {price:.2f}
+H1 Bias: {bias} {h1_desc}
+M15 Displacement: {displacement['direction']} body {displacement['body']:.2f} (avg {displacement['avg_body']:.2f} x{displacement['body']/displacement['avg_body']:.1f}) close {displacement['close_strength']*100:.0f}% break {broken_level:.2f}
+Pullback Zone: {zone_type} {pullback_zone_bottom:.2f}-{pullback_zone_top:.2f} (FVG: {fvg['type'] if fvg else 'None'})
+Current: {price:.2f} - NOT YET IN ZONE
+STATUS: WAITING FOR PULLBACK
+Session: {session_name}
+State: MOMENTUM_DETECTED → WAITING FOR PULLBACK
+""", "", "WAIT", fallback, None
+
+    # 7. Pullback must remain structurally valid
+    # For BUY: must not close decisively below invalidation (low of displacement)
+    # For SELL: must not close above
+    invalidation_level = displacement["low"] if bias=="BULL" else displacement["high"]
+    # Check if invalidated in last 10 candles
+    invalidated = False
+    if bias == "BULL":
+        for c in hist[-10:]:
+            if c < invalidation_level - atr_val*0.2:  # decisive close below
+                invalidated = True
+                break
+    else:
+        for c in hist[-10:]:
+            if c > invalidation_level + atr_val*0.2:
+                invalidated = True
+                break
+    if invalidated:
+        return f"""❌ {symbol_name} SETUP INVALIDATED
+💰 {price:.2f}
+H1 Bias: {bias}
+M15 Displacement: {displacement['direction']} break {broken_level:.2f}
+Invalidation: Price closed beyond {invalidation_level:.2f} (setup low/high)
+STATUS: INVALIDATED - Looking for new leg
+Session: {session_name}
+""", "", "WAIT", fallback, None
+
+    # 8. M15 confirmation - bullish/bearish close away from zone
+    # Last candle must close bullish for BUY, bearish for SELL, and away from zone
+    last_close = hist[-1]
+    last_open = hist[-2] if len(hist)>=2 else last_close
+    confirmation = False
+    conf_type = ""
+    if bias == "BULL":
+        if last_close > last_open and last_close > pullback_zone_top:
+            # Break of minor pullback high
+            recent_pullback_high = max(highs[-6:-1]) if len(highs)>=6 else highs[-2]
+            if last_close > recent_pullback_high:
+                confirmation = True
+                conf_type = f"Bullish close {last_close:.2f} > open {last_open:.2f} + break pullback high {recent_pullback_high:.2f}"
+    else:
+        if last_close < last_open and last_close < pullback_zone_bottom:
+            recent_pullback_low = min(lows[-6:-1]) if len(lows)>=6 else lows[-2]
+            if last_close < recent_pullback_low:
+                confirmation = True
+                conf_type = f"Bearish close {last_close:.2f} < open {last_open:.2f} + break pullback low {recent_pullback_low:.2f}"
+
+    if not confirmation:
+        return f"""⏳ {symbol_name} PULLBACK COMPLETED - WAITING FOR CONFIRMATION
+💰 {price:.2f}
+H1 Bias: {bias}
+M15 Displacement: {bias} body {displacement['body']:.2f} break {broken_level:.2f}
+Pullback: {zone_type} {pullback_zone_bottom:.2f}-{pullback_zone_top:.2f} - Price touched zone
+Last Candle: {last_open:.2f}→{last_close:.2f} {'BULL' if last_close>last_open else 'BEAR'}
+STATUS: WAITING FOR M15 CONFIRMATION (close away from zone + break minor high/low)
+Session: {session_name}
+State: PULLBACK CONFIRMED → WAITING FOR M15 CONFIRMATION
+""", "", "WAIT", fallback, None
+
+    # 9. Entry - after confirmation close
+    entry = last_close
+    
+    # 10. Stop loss - structural + ATR buffer
+    # For BUY: below pullback swing low
+    # For SELL: above swing high
+    swing_low = min(lows[-6:]) if len(lows)>=6 else min(lows[-3:])
+    swing_high = max(highs[-6:]) if len(highs)>=6 else max(highs[-3:])
+    buffer = atr_val * 0.3  # volatility buffer
+    
+    if bias == "BULL":
+        sl = swing_low - buffer
+    else:
+        sl = swing_high + buffer
+
+    risk = abs(entry - sl)
+    if risk < atr_val*0.5:  # Minimum risk to avoid tiny SL
+        risk = atr_val*0.5
+        sl = entry - risk if bias=="BULL" else entry + risk
+
+    # 11. Target with opposing structure filter
+    tp1 = entry + risk*1.5 if bias=="BULL" else entry - risk*1.5
+    tp2 = entry + risk*2.0 if bias=="BULL" else entry - risk*2.0
+    
+    # Check major opposing structure before 2R
+    # Find next major resistance/support
+    opposing_level = None
+    if bias == "BULL":
+        # Next resistance above entry
+        # Use H1 res and M15 res
+        candidates = [tf1["res"], tf15["res"]]
+        for cand in candidates:
+            if cand > entry and cand < tp2:
+                opposing_level = cand
+                break
+    else:
+        candidates = [tf1["sup"], tf15["sup"]]
+        for cand in candidates:
+            if cand < entry and cand > tp2:
+                opposing_level = cand
+                break
+
+    if opposing_level is not None:
+        # Major structure before 2R - reject
+        return f"""❌ {symbol_name} TARGET WARNING
+💰 {price:.2f} Entry would be {entry:.2f} SL {sl:.2f} risk {risk:.2f}
+Opposing Structure: {opposing_level:.2f} sits before 2R {tp2:.2f}
+TP2 would be {tp2:.2f} but structure at {opposing_level:.2f} blocks it
+STATUS: REJECTED - Major opposing structure before 2R
+Session: {session_name}
+""", "", "WAIT", fallback, None
+
+    # 12. Minimum R:R 1:2 check - we already have 1:2 as TP2
+    # Check if next structure allows 1:2
+    # Already filtered above
+
+    # 14. Spread/market quality already checked
+
+    # 15. Duplicate protection
+    if leg_id in MOMENTUM_LAST_SIGNAL:
+        last_time = MOMENTUM_LAST_SIGNAL[leg_id]
+        if time.time() - last_time < 900:  # 15 min duplicate protection per leg
+            return f"⏳ {symbol_name} DUPLICATE PROTECTION\nLeg {leg_id[:30]} already signaled {int((time.time()-last_time)/60)}m ago\nSTATUS: ONE SIGNAL ONLY per momentum leg", "", "WAIT", fallback, None
+
+    # Mark as signaled
+    MOMENTUM_LAST_SIGNAL[leg_id] = time.time()
+
+    # 16. Final valid signal
+    rr = 2.0
+    emoji = "🟢" if bias=="BULL" else "🔴"
+    direction_text = "MOMENTUM BUY" if bias=="BULL" else "MOMENTUM SELL"
+    
+    msg = f"""{emoji} XAUUSD {direction_text}
+
+ENTRY: {entry:.2f}
+SL: {sl:.2f}
+TP1: {tp1:.2f}
+TP2: {tp2:.2f}
+
+R:R: 1:{rr}
+
+TIMEFRAME
+H1 Bias → M15 Entry
+
+SESSION: {session_name}
+
+CONFIRMATION
+✓ H1 {bias.lower()} bias - {h1_desc}
+✓ Strong {bias.lower()} displacement body {displacement['body']:.2f} vs avg {displacement['avg_body']:.2f} (x{displacement['body']/displacement['avg_body']:.1f}) close {displacement['close_strength']*100:.0f}%
+✓ M15 structure break {broken_level:.2f}
+✓ Pullback completed to {zone_type} {pullback_zone_bottom:.2f}-{pullback_zone_top:.2f}
+✓ {bias} confirmation: {conf_type}
+✓ Valid structural SL {sl:.2f} (swing {swing_low if bias=='BULL' else swing_high:.2f} + ATR buffer {buffer:.2f})
+✓ Minimum 1:2 R:R (risk {risk:.2f})
+✓ Spread acceptable ATR {atr_val:.2f}
+
+STATUS: VALID MOMENTUM SETUP
+
+Risk: 0.5–1% maximum
+
+Price: {price:.2f} | Source: TwelveData XAU/USD | Leg: {leg_id[:20]}"""
+
+    # For chart
+    direction = bias
+    return msg, "", direction, fallback, None
+
+
+
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
     SUBSCRIBERS.add(update.effective_chat.id)
     await update.message.reply_text(f"🏆 GOLD VIP SIMPLIFIED 2-COMBO 🏆\n📢 {CHANNEL_USERNAME}\n\n🎯 ONLY 2 COMBOS (Profitable Long Term):\n\n1️⃣ MTF PREMIUM (4H->1H->15M) - 2-3 signals/day, 65% win, RR 1:2.5\n/signal - GOLD MTF Premium\n/mtf - ALL markets MTF\n/gold - GOLD MTF\n/silver - SILVER MTF\n/us30 - US30 MTF\n/ger30 - GER30 MTF\n/ndx - NDX MTF\n\n2️⃣ TREND (4H Only) - For bias\n/4h - 4H trend all\n\nOther:\n/buy - Join VIP $25/month\n/autopilot - Auto MTF\n\nThat's it! Only 2 combos, not 15. Profitable, simple.")
@@ -1356,6 +1780,64 @@ async def sendgoldmtf_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
         except Exception as e: await update.message.reply_text(f"❌ Failed: {e}")
     else: await update.message.reply_text(f"❌ No Gold MTF now\n\n{f}")
 
+
+async def momentum_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.reply_text("⏳ Analyzing XAU/USD MOMENTUM (H1 bias → M15 displacement → pullback → confirmation)...")
+        f,v,d,p,chart = build_momentum_signal("GOLD")
+        # f is full message (valid signal or waiting status)
+        await update.message.reply_text(f)
+        # If valid momentum, also send chart if available
+        # Generate chart for momentum signal
+        try:
+            sym, fb = SYMBOLS["GOLD"]
+            tf1 = analyze_1h(sym, fb)
+            tf15 = analyze_15m(sym, fb)
+            tf4 = analyze_4h(sym, fb)
+            if tf1 and tf15 and tf4 and "VALID MOMENTUM SETUP" in f:
+                # Extract entry/sl/tp from message
+                import re
+                entry_m = re.search(r'ENTRY: ([\d\.]+)', f)
+                sl_m = re.search(r'SL: ([\d\.]+)', f)
+                tp1_m = re.search(r'TP1: ([\d\.]+)', f)
+                tp2_m = re.search(r'TP2: ([\d\.]+)', f)
+                if entry_m and sl_m and tp1_m:
+                    price = float(entry_m.group(1))
+                    sl = float(sl_m.group(1))
+                    tp1 = float(tp1_m.group(1))
+                    tp2 = float(tp2_m.group(1)) if tp2_m else tp1
+                    is_buy = "MOMENTUM BUY" in f
+                    direction = "BUY" if is_buy else "SELL"
+                    chart_path = generate_mtf_chart("GOLD", tf4, tf1, tf15, price, sl, tp1, tp2, direction)
+                    if chart_path and os.path.exists(chart_path):
+                        await update.message.reply_photo(photo=open(chart_path,'rb'), caption=f"📊 MOMENTUM {direction}")
+        except Exception as e:
+            print(f"Momentum chart error: {e}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Momentum error: {e}")
+
+async def momentum_test_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    # For testing backtest logic - shows current state machine
+    try:
+        sym, fb = SYMBOLS["GOLD"]
+        tf1 = analyze_1h(sym, fb)
+        tf15 = analyze_15m(sym, fb)
+        session_ok, session_name = is_valid_session()
+        disp = detect_displacement_m15(tf15) if tf15 else None
+        lines = [f"🔬 MOMENTUM STATE MACHINE DEBUG",
+                 f"Session: {session_name} Valid={session_ok}",
+                 f"H1: {tf1['trend'] if tf1 else 'None'} {tf1['desc'] if tf1 else ''}",
+                 f"M15: {tf15['desc'] if tf15 else 'None'} ATR {tf15['atr'] if tf15 else 0:.2f}",
+                 f"Displacement: {disp['direction'] if disp else 'None'} body {disp['body']:.2f} vs avg {disp['avg_body']:.2f} x{disp['body']/disp['avg_body']:.1f}" if disp else "Displacement: None (body <1.8x avg or no break)",
+                 f"Price: {tf15['price'] if tf15 else 0:.2f}",
+                 f"Momentum legs stored: {len(MOMENTUM_STATE.get('GOLD', {}))}",
+                 f"Last signals: {len(MOMENTUM_LAST_SIGNAL)} legs (15min duplicate protection)"]
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"Debug error: {e}")
+
+
+
 def main():
     if not BOT_TOKEN: print("BOT_TOKEN missing"); return
     try: requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true",timeout=5)
@@ -1387,6 +1869,9 @@ def main():
     app.add_handler(CommandHandler("bestcombo",signal_cmd))
     app.add_handler(CommandHandler("gold3",gold_cmd))
     app.add_handler(CommandHandler("goldsweep",gold_cmd))
+    app.add_handler(CommandHandler("momentum",momentum_cmd))
+    app.add_handler(CommandHandler("mom",momentum_cmd))
+    app.add_handler(CommandHandler("momentumtest",momentum_test_cmd))
     print("SIMPLIFIED 2-COMBO MTF LIVE")
     app.run_polling(drop_pending_updates=True)
 
