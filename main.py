@@ -105,7 +105,76 @@ def atr(highs, lows, closes, period=14):
         trs.append(max(hl,hc,lc))
     return sum(trs[-period:])/period if trs else 5.0
 
-def get_real_price_mtf(symbol, interval, fallback):
+
+def get_twelvedata_mtf(symbol, interval, fallback):
+    # TwelveData API - more accurate real-time, fixes Yahoo lag issue
+    # Env: TWELVEDATA_API_KEY
+    # symbol mapping: GC=F -> XAU/USD, SI=F -> XAG/USD
+    api_key = os.getenv("TWELVEDATA_API_KEY", "")
+    if not api_key:
+        return None, [], [], []  # no key, fallback to Yahoo
+    try:
+        td_symbol_map = {
+            "GC=F": "XAU/USD",
+            "SI=F": "XAG/USD",
+            "^DJI": "DJI",
+            "^GDAXI": "DAX",
+            "^NDX": "NDX"
+        }
+        td_symbol = td_symbol_map.get(symbol, symbol)
+        td_interval_map = {"15m":"15min", "1h":"1h", "4h":"4h"}
+        td_interval = td_interval_map.get(interval, "15min")
+        # TwelveData time_series
+        url = f"https://api.twelvedata.com/time_series?symbol={td_symbol}&interval={td_interval}&outputsize=100&apikey={api_key}&order=ASC"
+        r = requests.get(url, timeout=10).json()
+        if "values" not in r:
+            print(f"TwelveData failed {symbol} {interval}: {r}")
+            return None, [], [], []
+        values = r["values"]  # oldest first because ASC
+        if len(values) < 20:
+            return None, [], [], []
+        closes = []
+        highs = []
+        lows = []
+        for v in values:
+            try:
+                closes.append(float(v["close"]))
+                highs.append(float(v["high"]))
+                lows.append(float(v["low"]))
+            except:
+                continue
+        if len(closes) < 20:
+            return None, [], [], []
+        price = closes[-1]
+        # For 4H, TwelveData already gives 4h directly, no need to aggregate
+        max_hist = 200 if interval=="4h" else 100
+        history = closes[-max_hist:]
+        highs = highs[-max_hist:]
+        lows = lows[-max_hist:]
+        key = f"{symbol}_{interval}_TD"
+        # Also cache in main cache for compatibility
+        PRICE_CACHE[f"{symbol}_{interval}"] = (price, history, highs, lows)
+        CACHE_TIME[f"{symbol}_{interval}"] = time.time()
+        print(f"TwelveData OK {symbol} {interval} price {price} len {len(history)}")
+        return price, history, highs, lows
+    except Exception as e:
+        print(f"TwelveData exception {symbol} {interval}: {e}")
+        return None, [], [], []
+
+def get_real_price_mtf_twelve_first(symbol, interval, fallback):
+    # Try TwelveData first if key exists, else Yahoo - avoids late entry due to Yahoo lag
+    # This fixes your 15M FAILED BEAR 4166.80 issue where price was 4138 but bot thought 4167
+    api_key = os.getenv("TWELVEDATA_API_KEY", "")
+    if api_key:
+        price, hist, highs, lows = get_twelvedata_mtf(symbol, interval, fallback)
+        if price is not None and len(hist) >= 20:
+            return price, hist, highs, lows
+    # Fallback to Yahoo
+    return get_real_price_mtf_yahoo(symbol, interval, fallback)
+
+
+
+def get_real_price_mtf_yahoo(symbol, interval, fallback):
     key = f"{symbol}_{interval}"
     now = time.time()
     if key in PRICE_CACHE and key in CACHE_TIME:
@@ -172,6 +241,12 @@ def get_real_price_mtf(symbol, interval, fallback):
     # If everything fails, return None - caller must handle WAIT
     print(f"CRITICAL: No data for {key}")
     return None, [], [], []
+
+
+def get_real_price_mtf(symbol, interval, fallback):
+    # Wrapper: TwelveData first (real-time), Yahoo second
+    return get_real_price_mtf_twelve_first(symbol, interval, fallback)
+
 
 def get_sr_levels(history, lookback=30, highs=None, lows=None, price=None, sh=None, sl=None):
     # IMPROVED: uses actual swing points sh/sl and ensures sup < price < res for 15M structure
@@ -347,8 +422,9 @@ def analyze_1h(symbol, fallback):
 
 def analyze_15m(symbol, fallback):
     spot_override = None
-    if symbol == "GC=F": spot_override = get_spot_gold_price()
-    elif symbol == "SI=F": spot_override = get_spot_silver_price()
+    if not os.getenv("TWELVEDATA_API_KEY"):
+        if symbol == "GC=F": spot_override = get_spot_gold_price()
+        elif symbol == "SI=F": spot_override = get_spot_silver_price()
     result = get_real_price_mtf(symbol, "15m", fallback)
     if result[0] is None: return None
     price, hist, highs, lows = result
@@ -533,8 +609,10 @@ def build_mtf_confluence(symbol_name):
         return msg, "", "WAIT", fallback, None
     price = tf15["price"]
     now = datetime.now().strftime('%H:%M')
+    # Data source indicator
+    data_source = "TwelveData XAU/USD" if os.getenv("TWELVEDATA_API_KEY") else "Yahoo GC=F + gold-api.com spot"
     lines = []
-    lines.append(f"🎯 {symbol_name} 4H->1H->15M PURE PRICE ACTION")
+    lines.append(f"🎯 {symbol_name} 4H->1H->15M PURE PRICE ACTION | Source: {data_source}")
     lines.append(f"💰 {price:.2f} | 4H {tf4['trend']} {tf4['conf']}% {tf4['desc']} | 1H {tf1['bias']} {tf1['sweep']} | 15M {tf15['trigger']} {tf15['desc']} FVG:{tf15['fvg']}")
     lines.append(f"4H: {tf4['desc']} | OB {tf4['ob_low']:.2f}/{tf4['ob_high']:.2f} S/R {tf4['sup']:.2f}/{tf4['res']:.2f} ATR {tf4['atr']:.2f}")
     lines.append(f"1H: {tf1['near_sr']} | S/R {tf1['sup']:.2f}/{tf1['res']:.2f} ATR {tf1['atr']:.2f}")
@@ -549,6 +627,21 @@ def build_mtf_confluence(symbol_name):
     def check_fresh(tf_name, fail_dir, desc, atr_tf, sup_tf, res_tf):
         if not fail_dir:
             return None
+        # === PRICE PROXIMITY FILTER - fixes your 4166.80 vs 4138.58 issue ===
+        # FAILED level must be near current price (within 2x ATR), else already transited
+        try:
+            # Extract failed level from desc: "FAILED BEAR 4166.80 -> ..."
+            import re
+            m = re.search(r'FAILED \w+ ([\d\.]+)', desc)
+            if m:
+                failed_level = float(m.group(1))
+                dist = abs(price - failed_level)
+                max_dist = atr_tf * 2.5  # within 2.5 ATR
+                if dist > max_dist:
+                    lines.append(f"❌ FAR FAILED {tf_name} {fail_dir} level {failed_level:.2f} vs price {price:.2f} dist {dist:.2f} > {max_dist:.2f} ATR - already transited {price:.2f}, skip (your 4166 vs 4138 case)")
+                    return None
+        except:
+            pass
         key = f"{symbol_name}_{tf_name}_{fail_dir}_{desc[:30]}"
         now_ts = time.time()
         if key not in FAILED_TRACKER:
