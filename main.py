@@ -54,6 +54,8 @@ ACTIVE_TRADES={}  # {symbol: {entry, sl, tp1, tp2, tp3, direction, trail_sl, sta
 
 PRICE_CACHE = {}
 CACHE_TIME = {}
+FAILED_TRACKER = {}  # key: symbol_tf_dir -> first seen timestamp, to enforce 1-5min expiry
+FAILED_EXPIRY_SECONDS = 300  # 5 mins max - avoid late entry per user request
 
 def ema(vals, period):
     if len(vals) < period:
@@ -539,15 +541,49 @@ def build_mtf_confluence(symbol_name):
     lines.append(f"15M: {tf15['desc']} | FVG {tf15['fvg']} | S/R {tf15['sup']:.2f}/{tf15['res']:.2f} ATR {tf15['atr']:.2f}")
     lines.append("")
     direction = "WAIT"
-    # === IMMEDIATE FAILED TRANSIT - CHECK FIRST (what user wants: immediately they failed, don't give signal if not failed) ===
-    # Priority: 15M > 1H > 4H - immediate reversal when BOS fails
+    # === IMMEDIATE FAILED TRANSIT - 1-5 MIN EXPIRY (avoid late entry) ===
+    # User: "Their immediate whether 4H1H15M should be in a minute to 5mins not after that as a signal. To avoid Late entry"
     immediate_failed = None
+    raw_failed = None
     if tf15.get("failed") and tf15.get("fail_dir"):
-        immediate_failed = ("15M", tf15["fail_dir"], tf15["desc"], tf15["atr"], tf15["sup"], tf15["res"])
+        raw_failed = ("15M", tf15["fail_dir"], tf15["desc"], tf15["atr"], tf15["sup"], tf15["res"])
     elif tf1.get("failed") and tf1.get("fail_dir"):
-        immediate_failed = ("1H", tf1["fail_dir"], tf1["desc"] + f" | {tf1['sweep']}", tf1["atr"], tf1["sup"], tf1["res"])
+        raw_failed = ("1H", tf1["fail_dir"], tf1["desc"] + f" | {tf1['sweep']}", tf1["atr"], tf1["sup"], tf1["res"])
     elif tf4.get("failed") and tf4.get("fail_dir"):
-        immediate_failed = ("4H", tf4["fail_dir"], tf4["desc"], tf4["atr"], tf4["sup"], tf4["res"])
+        raw_failed = ("4H", tf4["fail_dir"], tf4["desc"], tf4["atr"], tf4["sup"], tf4["res"])
+
+    # Check 5-min expiry
+    if raw_failed:
+        tf_name, fail_dir, desc, atr_tf, sup_tf, res_tf = raw_failed
+        key = f"{symbol_name}_{tf_name}_{fail_dir}_{desc[:30]}"  # unique per failure type
+        now_ts = time.time()
+        if key not in FAILED_TRACKER:
+            # First time seen - fresh failure, within 1 min
+            FAILED_TRACKER[key] = now_ts
+            immediate_failed = raw_failed
+            lines.append(f"✅ FRESH FAILED {tf_name} {fail_dir} - {int(now_ts - FAILED_TRACKER[key])}s ago (within 5m) - VALID")
+        else:
+            age = now_ts - FAILED_TRACKER[key]
+            if age <= FAILED_EXPIRY_SECONDS:
+                # Still within 1-5 mins - valid, avoid late entry
+                immediate_failed = raw_failed
+                lines.append(f"✅ FRESH FAILED {tf_name} {fail_dir} - {int(age)}s ago ({int(age//60)}m {int(age%60)}s) - VALID (<5m)")
+            else:
+                # Expired >5 mins - avoid late entry
+                lines.append(f"❌ EXPIRED FAILED {tf_name} {fail_dir} - {int(age)}s ago ({int(age//60)}m) - TOO LATE, WAIT (avoid late entry)")
+                # Clear tracker so next new failure can be detected
+                # Don't delete immediately, keep but mark expired
+                immediate_failed = None
+                # Remove expired key after 10 mins to allow re-detection
+                if age > 600:
+                    del FAILED_TRACKER[key]
+    else:
+        # No failure now - clear old trackers for this symbol (reset)
+        keys_to_clear = [k for k in FAILED_TRACKER.keys() if k.startswith(symbol_name+"_")]
+        for k in keys_to_clear:
+            # Keep for 5 mins after failure disappears, then clear
+            if time.time() - FAILED_TRACKER[k] > FAILED_EXPIRY_SECONDS + 60:
+                del FAILED_TRACKER[k]
 
     # PURE PRICE ACTION CONFLUENCE - No EMA/RSI
     # Need: 4H BOS + 1H Sweep + 15M CHoCH/FVG
@@ -724,32 +760,35 @@ def build_mtf_confluence(symbol_name):
         vip_lines.append(f"Entry: {price:.2f}")
         vip_lines.append(f"SL: {sell_sl:.2f} TP1: {sell_tp1:.2f} TP2: {sell_tp2:.2f} TP3: {sell_tp3:.2f}")
         vip_lines.append(f"⏰ {now}")
-    # === 15M SCALP MODE: immediate fail + 15M structure TP ===
+    # === 15M SCALP MODE: immediate fail only + 15M structure TP (1-5min expiry) ===
     elif tf15["conf"] >= 60 and tf15["trigger"] in ["BUY","SELL"]:
-        # Only give signal if failed or CHoCH/BOS (user: if not failed don't give signal)
-        has_fail = tf15.get("failed") or "CHoCH" in tf15["desc"] or "BOS" in tf15["desc"] or "FAILED" in tf15["desc"]
+        has_fail = tf15.get("failed") and tf15.get("fail_dir")
+        recent_15 = False
+        if tf15.get("sh") and tf15.get("sl"):
+            try:
+                last_idx = max([i for i,_ in tf15["sh"]+tf15["sl"]], default=0)
+                recent_15 = last_idx >= len(tf15["hist"])-3
+            except:
+                recent_15 = True
+        else:
+            recent_15 = True
+        has_fail = has_fail and recent_15
         if not has_fail:
-            pass  # will fall through to WAIT - respects user rule
+            direction = "WAIT"
         else:
             is_buy_scalp = tf15["trigger"] == "BUY" or (tf15.get("fail_dir")=="BULL")
             direction = f"{'BUY' if is_buy_scalp else 'SELL'}_SCALP_15M"
             emoji = "⚡🟢" if is_buy_scalp else "⚡🔴"
             atr_15 = tf15["atr"]
-            # SL/TP RESPECT 15M STRUCTURE (user: 15M structure should be respected in taking TP)
             if is_buy_scalp:
                 scalp_sl = tf15["sup"] - atr_15*0.3 if tf15["sup"] < price else price - atr_15*0.8
-                # TP1 = 15M res, TP2 = 1H res, TP3 = 4H res - all structure
                 tp1_struct = tf15["res"] if tf15["res"] > price + atr_15*0.3 else price + atr_15*1.0
                 tp2_struct = tf1["res"] if tf1["res"] > tp1_struct else price + atr_15*1.8
                 tp3_struct = tf4["res"] if tf4["res"] > tp2_struct else price + atr_15*2.5
                 scalp_tp1 = tp1_struct; scalp_tp2 = tp2_struct; scalp_tp3 = tp3_struct
-                lines.append(f"⚡ 15M IMMEDIATE FAILED -> BUY (15M structure TP)")
-                lines.append(f"{emoji} {symbol_name} SCALP BUY NOW")
-                lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} [15M {tf15['res']:.2f}] TP2: {scalp_tp2:.2f} [1H] TP3: {scalp_tp3:.2f} [4H] ⏰ {now}")
-                lines.append(f"Reason: {tf15['desc']} | {tf15['fvg']} | TP respects 15M structure")
-                vip_lines.append(f"{emoji} {symbol_name} 15M SCALP BUY - IMMEDIATE FAILED")
-                vip_lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} (15M) TP2: {scalp_tp2:.2f} TP3: {scalp_tp3:.2f}")
-                vip_lines.append(f"⚠️ 15M {tf15['desc']} | TP1=15M structure {tf15['res']:.2f}")
+                lines.append(f"⚡ 15M IMMEDIATE FAILED -> BUY (15M structure TP) FRESH <5m")
+                lines.append(f"{emoji} {symbol_name} SCALP BUY NOW Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} [15M {tf15['res']:.2f}] TP2: {scalp_tp2:.2f} [1H] TP3: {scalp_tp3:.2f} [4H] ⏰ {now}")
+                vip_lines.append(f"{emoji} {symbol_name} 15M SCALP BUY - IMMEDIATE FAILED <5m Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f}")
                 buy_sl = scalp_sl; buy_tp1 = scalp_tp1; buy_tp2 = scalp_tp2; buy_tp3 = scalp_tp3
                 sell_sl = scalp_sl; sell_tp1 = scalp_tp1; sell_tp2 = scalp_tp2; sell_tp3 = scalp_tp3
             else:
@@ -758,98 +797,93 @@ def build_mtf_confluence(symbol_name):
                 tp2_struct = tf1["sup"] if tf1["sup"] < tp1_struct else price - atr_15*1.8
                 tp3_struct = tf4["sup"] if tf4["sup"] < tp2_struct else price - atr_15*2.5
                 scalp_tp1 = tp1_struct; scalp_tp2 = tp2_struct; scalp_tp3 = tp3_struct
-                lines.append(f"⚡ 15M IMMEDIATE FAILED -> SELL (15M structure TP)")
-                lines.append(f"{emoji} {symbol_name} SCALP SELL NOW")
-                lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} [15M {tf15['sup']:.2f}] TP2: {scalp_tp2:.2f} [1H] TP3: {scalp_tp3:.2f} [4H] ⏰ {now}")
-                lines.append(f"Reason: {tf15['desc']} | {tf15['fvg']} | TP respects 15M structure")
-                vip_lines.append(f"{emoji} {symbol_name} 15M SCALP SELL - IMMEDIATE FAILED")
-                vip_lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} (15M) TP2: {scalp_tp2:.2f} TP3: {scalp_tp3:.2f}")
-                vip_lines.append(f"⚠️ 15M {tf15['desc']} | TP1=15M structure {tf15['sup']:.2f}")
+                lines.append(f"⚡ 15M IMMEDIATE FAILED -> SELL (15M structure TP) FRESH <5m")
+                lines.append(f"{emoji} {symbol_name} SCALP SELL NOW Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} [15M {tf15['sup']:.2f}] TP2: {scalp_tp2:.2f} [1H] TP3: {scalp_tp3:.2f} [4H] ⏰ {now}")
+                vip_lines.append(f"{emoji} {symbol_name} 15M SCALP SELL - IMMEDIATE FAILED <5m Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f}")
                 buy_sl = scalp_sl; buy_tp1 = scalp_tp1; buy_tp2 = scalp_tp2; buy_tp3 = scalp_tp3
                 sell_sl = scalp_sl; sell_tp1 = scalp_tp1; sell_tp2 = scalp_tp2; sell_tp3 = scalp_tp3
-            # If not failed, direction stays WAIT (don't give signal)
-            if not has_fail:
-                # Don't set direction, let it fall to WAIT
-                direction = "WAIT"
-                # Remove last added lines if any (we didn't add)
-                pass
-    # === 1H FAILED TRANSIT SCALP - IMMEDIATE + 15M TP ===
+    # === 1H FAILED TRANSIT SCALP - IMMEDIATE 1-5min only ===
     elif tf1["conf"] >= 60 and tf1["bias"] in ["BULL","BEAR"]:
-        has_fail_1h = tf1.get("failed") or "CHoCH" in tf1["desc"] or "BOS" in tf1["desc"] or "Sweep" in tf1["sweep"] or "FAILED" in tf1["desc"]
-        if not has_fail_1h:
-            direction = "WAIT"  # if not failed don't give signal
+        has_fail_1h = tf1.get("failed") and tf1.get("fail_dir")
+        recent_1h = False
+        if tf1.get("sh") and tf1.get("sl"):
+            try:
+                last_idx = max([i for i,_ in tf1["sh"]+tf1["sl"]], default=0)
+                recent_1h = last_idx >= len(tf1["hist"])-2
+            except:
+                recent_1h = True
         else:
-            is_buy = tf1["bias"] == "BULL" or tf1.get("fail_dir")=="BULL"
+            recent_1h = True
+        has_fail_1h = has_fail_1h and recent_1h
+        if not has_fail_1h:
+            direction = "WAIT"
+        else:
+            is_buy = tf1.get("fail_dir")=="BULL"
             direction = f"{'BULL' if is_buy else 'BEAR'}_SCALP_1H"
             emoji = "⚡⚡🟢" if is_buy else "⚡⚡🔴"
             atr_1 = tf1["atr"]
-            # TP respects 15M structure per user
             if is_buy:
-                scalp_sl = min(tf15["sup"], tf1["sup"]) - atr_1*0.3
-                scalp_tp1 = tf15["res"] if tf15["res"] > price + atr_1*0.3 else price + atr_1*0.8  # 15M structure
+                scalp_sl = tf15["sup"] - atr_1*0.3
+                scalp_tp1 = tf15["res"] if tf15["res"] > price + atr_1*0.3 else price + atr_1*0.8
                 scalp_tp2 = tf1["res"] if tf1["res"] > scalp_tp1 else price + atr_1*1.5
                 scalp_tp3 = tf4["res"] if tf4["res"] > scalp_tp2 else price + atr_1*2.2
-                lines.append(f"⚡⚡ 1H IMMEDIATE FAILED -> BUY (TP respects 15M)")
-                lines.append(f"{emoji} {symbol_name} 1H SCALP BUY NOW")
-                lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} [15M {tf15['res']:.2f}] TP2: {scalp_tp2:.2f} [1H] TP3: {scalp_tp3:.2f} [4H] ⏰ {now}")
-                vip_lines.append(f"{emoji} {symbol_name} 1H SCALP BUY - IMMEDIATE")
-                vip_lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} (15M) TP2: {scalp_tp2:.2f}")
-                vip_lines.append(f"⚠️ 1H {tf1['desc']} | TP1=15M structure")
+                lines.append(f"⚡⚡ 1H IMMEDIATE FAILED -> BUY FRESH <5m Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} [15M]")
+                vip_lines.append(f"{emoji} {symbol_name} 1H SCALP BUY <5m Entry: {price:.2f}")
             else:
-                scalp_sl = max(tf15["res"], tf1["res"]) + atr_1*0.3
+                scalp_sl = tf15["res"] + atr_1*0.3
                 scalp_tp1 = tf15["sup"] if tf15["sup"] < price - atr_1*0.3 else price - atr_1*0.8
                 scalp_tp2 = tf1["sup"] if tf1["sup"] < scalp_tp1 else price - atr_1*1.5
                 scalp_tp3 = tf4["sup"] if tf4["sup"] < scalp_tp2 else price - atr_1*2.2
-                lines.append(f"⚡⚡ 1H IMMEDIATE FAILED -> SELL (TP respects 15M)")
-                lines.append(f"{emoji} {symbol_name} 1H SCALP SELL NOW")
-                lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} [15M {tf15['sup']:.2f}] TP2: {scalp_tp2:.2f} [1H] TP3: {scalp_tp3:.2f} [4H] ⏰ {now}")
-                vip_lines.append(f"{emoji} {symbol_name} 1H SCALP SELL - IMMEDIATE")
-                vip_lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} (15M) TP2: {scalp_tp2:.2f}")
-                vip_lines.append(f"⚠️ 1H {tf1['desc']} | TP1=15M structure")
+                lines.append(f"⚡⚡ 1H IMMEDIATE FAILED -> SELL FRESH <5m Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} [15M]")
+                vip_lines.append(f"{emoji} {symbol_name} 1H SCALP SELL <5m Entry: {price:.2f}")
             buy_sl = scalp_sl; buy_tp1 = scalp_tp1; buy_tp2 = scalp_tp2; buy_tp3 = scalp_tp3
             sell_sl = scalp_sl; sell_tp1 = scalp_tp1; sell_tp2 = scalp_tp2; sell_tp3 = scalp_tp3
-    # === 4H FAILED TRANSIT SCALP - IMMEDIATE + 15M TP ===
+    # === 4H FAILED TRANSIT SCALP - IMMEDIATE 1-5min only ===
     elif tf4["conf"] >= 60 and tf4["trend"] in ["BULL","BEAR"]:
-        has_fail_4h = tf4.get("failed") or "CHoCH" in tf4["desc"] or "BOS" in tf4["desc"] or "FAILED" in tf4["desc"]
+        has_fail_4h = tf4.get("failed") and tf4.get("fail_dir")
+        recent_4h = False
+        if tf4.get("sh") and tf4.get("sl"):
+            try:
+                last_idx = max([i for i,_ in tf4["sh"]+tf4["sl"]], default=0)
+                recent_4h = last_idx >= len(tf4["hist"])-2
+            except:
+                recent_4h = True
+        else:
+            recent_4h = True
+        has_fail_4h = has_fail_4h and recent_4h
         if not has_fail_4h:
             direction = "WAIT"
         else:
-            is_buy = tf4["trend"] == "BULL" or tf4.get("fail_dir")=="BULL"
+            is_buy = tf4.get("fail_dir")=="BULL"
             direction = f"{'BULL' if is_buy else 'BEAR'}_SCALP_4H"
             emoji = "⚡⚡⚡🟢" if is_buy else "⚡⚡⚡🔴"
             atr_4 = tf4["atr"]
             if is_buy:
-                scalp_sl = min(tf15["sup"], tf4["sup"]) - atr_4*0.4
+                scalp_sl = tf15["sup"] - atr_4*0.4
                 scalp_tp1 = tf15["res"] if tf15["res"] > price + atr_4*0.3 else price + atr_4*0.8
                 scalp_tp2 = tf1["res"] if tf1["res"] > scalp_tp1 else price + atr_4*1.5
                 scalp_tp3 = tf4["res"] if tf4["res"] > scalp_tp2 else price + atr_4*2.5
-                lines.append(f"⚡⚡⚡ 4H IMMEDIATE FAILED -> BUY (TP respects 15M)")
-                lines.append(f"{emoji} {symbol_name} 4H SCALP BUY NOW")
-                lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} [15M {tf15['res']:.2f}] TP2: {scalp_tp2:.2f} TP3: {scalp_tp3:.2f} ⏰ {now}")
-                vip_lines.append(f"{emoji} {symbol_name} 4H SCALP BUY - IMMEDIATE")
-                vip_lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} (15M) TP2: {scalp_tp2:.2f}")
+                lines.append(f"⚡⚡⚡ 4H IMMEDIATE FAILED -> BUY FRESH <5m Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f}")
+                vip_lines.append(f"{emoji} {symbol_name} 4H SCALP BUY <5m")
             else:
-                scalp_sl = max(tf15["res"], tf4["res"]) + atr_4*0.4
+                scalp_sl = tf15["res"] + atr_4*0.4
                 scalp_tp1 = tf15["sup"] if tf15["sup"] < price - atr_4*0.3 else price - atr_4*0.8
                 scalp_tp2 = tf1["sup"] if tf1["sup"] < scalp_tp1 else price - atr_4*1.5
                 scalp_tp3 = tf4["sup"] if tf4["sup"] < scalp_tp2 else price - atr_4*2.5
-                lines.append(f"⚡⚡⚡ 4H IMMEDIATE FAILED -> SELL (TP respects 15M)")
-                lines.append(f"{emoji} {symbol_name} 4H SCALP SELL NOW")
-                lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} [15M {tf15['sup']:.2f}] TP2: {scalp_tp2:.2f} TP3: {scalp_tp3:.2f} ⏰ {now}")
-                vip_lines.append(f"{emoji} {symbol_name} 4H SCALP SELL - IMMEDIATE")
-                vip_lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} (15M) TP2: {scalp_tp2:.2f}")
+                lines.append(f"⚡⚡⚡ 4H IMMEDIATE FAILED -> SELL FRESH <5m Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f}")
+                vip_lines.append(f"{emoji} {symbol_name} 4H SCALP SELL <5m")
             buy_sl = scalp_sl; buy_tp1 = scalp_tp1; buy_tp2 = scalp_tp2; buy_tp3 = scalp_tp3
             sell_sl = scalp_sl; sell_tp1 = scalp_tp1; sell_tp2 = scalp_tp2; sell_tp3 = scalp_tp3
     else:
-        lines.append(f"❌ WAIT No MTF confluence")
+        lines.append(f"❌ WAIT No MTF confluence - No fresh FAILED in last 5m (avoid late entry)")
         lines.append(f"4H {tf4['trend']} | 1H {tf1['bias']} | 15M {tf15['trigger']}")
-        # Even in WAIT, show 15M scalp potential if exists but low conf
         if tf15["trigger"] in ["BUY","SELL"]:
-            lines.append(f"👀 15M PA showing {tf15['trigger']} ({tf15['desc']}) but conf {tf15['conf']}% <65 or no FVG - waiting for CHoCH/BOS")
+            lines.append(f"👀 15M {tf15['trigger']} {tf15['desc']} - not fresh FAILED, waiting")
         if tf1["bias"] in ["BULL","BEAR"]:
-            lines.append(f"👀 1H {tf1['bias']} {tf1['desc']} | {tf1['sweep']} - watch for 1H failed transit scalp")
+            lines.append(f"👀 1H {tf1['bias']} {tf1['desc']} - waiting for fresh FAILED <5m")
         if tf4["trend"] in ["BULL","BEAR"]:
-            lines.append(f"👀 4H {tf4['trend']} {tf4['desc']} - watch for 4H failed transit scalp")
+            lines.append(f"👀 4H {tf4['trend']} {tf4['desc']} - waiting for fresh FAILED <5m")
+    # Generate chart
     # Generate chart only when we have a valid trade (including SCALP)
     chart_path = None
     if "BUY" in direction or "SELL" in direction:
