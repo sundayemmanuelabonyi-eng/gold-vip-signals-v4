@@ -541,49 +541,83 @@ def build_mtf_confluence(symbol_name):
     lines.append(f"15M: {tf15['desc']} | FVG {tf15['fvg']} | S/R {tf15['sup']:.2f}/{tf15['res']:.2f} ATR {tf15['atr']:.2f}")
     lines.append("")
     direction = "WAIT"
-    # === IMMEDIATE FAILED TRANSIT - 1-5 MIN EXPIRY (avoid late entry) ===
-    # User: "Their immediate whether 4H1H15M should be in a minute to 5mins not after that as a signal. To avoid Late entry"
+    # === IMMEDIATE FAILED TRANSIT - 1-5 MIN EXPIRY + CONFLICT FILTER ===
+    # User: 1-5mins only, avoid late entry. Also avoid opposite TF conflict.
     immediate_failed = None
-    raw_failed = None
-    if tf15.get("failed") and tf15.get("fail_dir"):
-        raw_failed = ("15M", tf15["fail_dir"], tf15["desc"], tf15["atr"], tf15["sup"], tf15["res"])
-    elif tf1.get("failed") and tf1.get("fail_dir"):
-        raw_failed = ("1H", tf1["fail_dir"], tf1["desc"] + f" | {tf1['sweep']}", tf1["atr"], tf1["sup"], tf1["res"])
-    elif tf4.get("failed") and tf4.get("fail_dir"):
-        raw_failed = ("4H", tf4["fail_dir"], tf4["desc"], tf4["atr"], tf4["sup"], tf4["res"])
+    fresh_failed_list = []  # collect all fresh failed across TFs
 
-    # Check 5-min expiry
-    if raw_failed:
-        tf_name, fail_dir, desc, atr_tf, sup_tf, res_tf = raw_failed
-        key = f"{symbol_name}_{tf_name}_{fail_dir}_{desc[:30]}"  # unique per failure type
+    def check_fresh(tf_name, fail_dir, desc, atr_tf, sup_tf, res_tf):
+        if not fail_dir:
+            return None
+        key = f"{symbol_name}_{tf_name}_{fail_dir}_{desc[:30]}"
         now_ts = time.time()
         if key not in FAILED_TRACKER:
-            # First time seen - fresh failure, within 1 min
             FAILED_TRACKER[key] = now_ts
-            immediate_failed = raw_failed
-            lines.append(f"✅ FRESH FAILED {tf_name} {fail_dir} - {int(now_ts - FAILED_TRACKER[key])}s ago (within 5m) - VALID")
+            age = 0
         else:
             age = now_ts - FAILED_TRACKER[key]
-            if age <= FAILED_EXPIRY_SECONDS:
-                # Still within 1-5 mins - valid, avoid late entry
-                immediate_failed = raw_failed
-                lines.append(f"✅ FRESH FAILED {tf_name} {fail_dir} - {int(age)}s ago ({int(age//60)}m {int(age%60)}s) - VALID (<5m)")
-            else:
-                # Expired >5 mins - avoid late entry
-                lines.append(f"❌ EXPIRED FAILED {tf_name} {fail_dir} - {int(age)}s ago ({int(age//60)}m) - TOO LATE, WAIT (avoid late entry)")
-                # Clear tracker so next new failure can be detected
-                # Don't delete immediately, keep but mark expired
-                immediate_failed = None
-                # Remove expired key after 10 mins to allow re-detection
+            if age > FAILED_EXPIRY_SECONDS:
+                lines.append(f"❌ EXPIRED FAILED {tf_name} {fail_dir} - {int(age)}s ago ({int(age//60)}m) - TOO LATE")
                 if age > 600:
                     del FAILED_TRACKER[key]
-    else:
-        # No failure now - clear old trackers for this symbol (reset)
+                return None
+        # valid fresh
+        if age == 0:
+            lines.append(f"✅ FRESH FAILED {tf_name} {fail_dir} - {int(age)}s ago (within 5m) - VALID")
+        else:
+            lines.append(f"✅ FRESH FAILED {tf_name} {fail_dir} - {int(age)}s ago ({int(age//60)}m {int(age%60)}s) - VALID (<5m)")
+        return (tf_name, fail_dir, desc, atr_tf, sup_tf, res_tf, age)
+
+    # Check each TF independently (don't elif - check all)
+    if tf15.get("failed") and tf15.get("fail_dir"):
+        f = check_fresh("15M", tf15["fail_dir"], tf15["desc"], tf15["atr"], tf15["sup"], tf15["res"])
+        if f: fresh_failed_list.append(f)
+    if tf1.get("failed") and tf1.get("fail_dir"):
+        f = check_fresh("1H", tf1["fail_dir"], tf1["desc"] + f" | {tf1['sweep']}", tf1["atr"], tf1["sup"], tf1["res"])
+        if f: fresh_failed_list.append(f)
+    if tf4.get("failed") and tf4.get("fail_dir"):
+        f = check_fresh("4H", tf4["fail_dir"], tf4["desc"], tf4["atr"], tf4["sup"], tf4["res"])
+        if f: fresh_failed_list.append(f)
+
+    # Clean old trackers if no fresh at all
+    if not fresh_failed_list:
         keys_to_clear = [k for k in FAILED_TRACKER.keys() if k.startswith(symbol_name+"_")]
         for k in keys_to_clear:
-            # Keep for 5 mins after failure disappears, then clear
             if time.time() - FAILED_TRACKER[k] > FAILED_EXPIRY_SECONDS + 60:
                 del FAILED_TRACKER[k]
+    else:
+        # Handle conflict: if we have opposite directions within 5m, avoid counter-trend
+        dirs = set([x[1] for x in fresh_failed_list])
+        if len(dirs) > 1:
+            # Conflict detected - e.g., 4H BEAR and 1H BULL both fresh
+            # Prioritize 4H trend (higher TF) and 15M alignment, avoid counter-trend scalp
+            # Count: if 2 SELL (4H+15M) vs 1 BUY (1H) -> go SELL, but show conflict warning
+            # If 4H 90% BEAR vs 1H BULL, prioritize 4H
+            bulls = [x for x in fresh_failed_list if x[1]=="BULL"]
+            bears = [x for x in fresh_failed_list if x[1]=="BEAR"]
+            # If 4H is present, it wins
+            has_4h = [x for x in fresh_failed_list if x[0]=="4H"]
+            has_15m_choc_bear = "CHoCH BEAR" in tf15["desc"] or tf15["trigger"]=="SELL"
+            has_15m_choc_bull = "CHoCH BULL" in tf15["desc"] or tf15["trigger"]=="BUY"
+            if has_4h:
+                # 4H is strongest - use 4H direction
+                immediate_failed = has_4h[0][:6]  # take 4H as main, ignore counter
+                lines.append(f"⚠️ CONFLICT: {len(bulls)} BULL vs {len(bears)} BEAR fresh - 4H {has_4h[0][1]} wins (higher TF) | 15M {tf15['trigger']} aligns")
+                # If 15M CHoCH aligns with 4H, even stronger
+                if has_4h[0][1]=="BEAR" and has_15m_choc_bear:
+                    lines.append(f"✅ 15M {tf15['trigger']} aligns with 4H BEAR - STRONG SELL")
+                elif has_4h[0][1]=="BULL" and has_15m_choc_bull:
+                    lines.append(f"✅ 15M {tf15['trigger']} aligns with 4H BULL - STRONG BUY")
+            else:
+                # No 4H, conflict between 1H and 15M - WAIT to avoid late entry
+                lines.append(f"❌ CONFLICT: 1H {fresh_failed_list[0][1]} vs 15M opposite - WAIT (avoid counter-trend, need alignment)")
+                immediate_failed = None
+        else:
+            # All same direction - pick most recent (lowest age) or highest TF priority 4H>1H>15M
+            # Sort by TF priority: 4H first, then 1H, then 15M, but also by freshness
+            priority = {"4H":0, "1H":1, "15M":2}
+            fresh_failed_list.sort(key=lambda x: (priority.get(x[0],3), x[6]))  # priority then age
+            immediate_failed = fresh_failed_list[0][:6]
 
     # PURE PRICE ACTION CONFLUENCE - No EMA/RSI
     # Need: 4H BOS + 1H Sweep + 15M CHoCH/FVG
