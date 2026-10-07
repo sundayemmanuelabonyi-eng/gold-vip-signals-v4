@@ -943,6 +943,40 @@ def build_mtf_confluence(symbol_name):
         vip_lines.append(f"Entry: {price:.2f}")
         vip_lines.append(f"SL: {sell_sl:.2f} TP1: {sell_tp1:.2f} TP2: {sell_tp2:.2f} TP3: {sell_tp3:.2f}")
         vip_lines.append(f"⏰ {now}")
+    # === RANGE MODE: When 4H is RANGE, allow 15M BOS scalp (no FAILED needed) ===
+    elif tf4["trend"] == "RANGE" and tf15["conf"] >= 70 and tf15["trigger"] in ["BUY","SELL"]:
+        # Market is ranging today (your current 4107-4183) - give 15M trend scalp
+        is_buy_range = tf15["trigger"] == "BUY"
+        direction = "BUY" if is_buy_range else "SELL"
+        emoji = "🟡🟢" if is_buy_range else "🟡🔴"
+        atr_15 = tf15["atr"]
+        if is_buy_range:
+            range_sl = tf15["sup"] - atr_15*0.4
+            if range_sl >= price: range_sl = price - atr_15*1.0
+            range_tp1 = tf15["res"]
+            if range_tp1 <= price + atr_15*0.5: range_tp1 = price + atr_15*1.2
+            range_tp2 = tf1["res"] if tf1["res"] > range_tp1 else price + atr_15*2.0
+            range_tp3 = tf4["res"] if tf4["res"] > range_tp2 else price + atr_15*3.0
+            lines.append(f"⚪ 4H RANGE {tf4['conf']}% BUT 15M {tf15['trigger']} BOS {tf15['desc']} - RANGE SCALP")
+            lines.append(f"{emoji} {symbol_name} {direction} RANGE SCALP Entry: {price:.2f} SL: {range_sl:.2f} TP1: {range_tp1:.2f} (15M res) TP2: {range_tp2:.2f} TP3: {range_tp3:.2f} ⏰ {now}")
+            lines.append(f"Note: 4H Range {tf4['ob_low']:.0f}-{tf4['ob_high']:.0f}, trading 15M momentum only, small size")
+            vip_lines.append(f"{emoji} {symbol_name} {direction} RANGE SCALP - 4H RANGE but 15M {tf15['trigger']}")
+            vip_lines.append(f"Entry: {price:.2f} SL: {range_sl:.2f} TP1: {range_tp1:.2f} TP2: {range_tp2:.2f} TP3: {range_tp3:.2f}")
+        else:
+            range_sl = tf15["res"] + atr_15*0.4
+            if range_sl <= price: range_sl = price + atr_15*1.0
+            range_tp1 = tf15["sup"]
+            if range_tp1 >= price - atr_15*0.5: range_tp1 = price - atr_15*1.2
+            range_tp2 = tf1["sup"] if tf1["sup"] < range_tp1 else price - atr_15*2.0
+            range_tp3 = tf4["sup"] if tf4["sup"] < range_tp2 else price - atr_15*3.0
+            lines.append(f"⚪ 4H RANGE {tf4['conf']}% BUT 15M {tf15['trigger']} BOS {tf15['desc']} - RANGE SCALP")
+            lines.append(f"{emoji} {symbol_name} {direction} RANGE SCALP Entry: {price:.2f} SL: {range_sl:.2f} TP1: {range_tp1:.2f} (15M sup) TP2: {range_tp2:.2f} TP3: {range_tp3:.2f} ⏰ {now}")
+            lines.append(f"Note: 4H Range {tf4['ob_low']:.0f}-{tf4['ob_high']:.0f}, trading 15M momentum only, small size")
+            vip_lines.append(f"{emoji} {symbol_name} {direction} RANGE SCALP - 4H RANGE but 15M {tf15['trigger']}")
+            vip_lines.append(f"Entry: {price:.2f} SL: {range_sl:.2f} TP1: {range_tp1:.2f} TP2: {range_tp2:.2f} TP3: {range_tp3:.2f}")
+        buy_sl = range_sl; buy_tp1 = range_tp1; buy_tp2 = range_tp2; buy_tp3 = range_tp3
+        sell_sl = range_sl; sell_tp1 = range_tp1; sell_tp2 = range_tp2; sell_tp3 = range_tp3
+
     # === 15M SCALP MODE: immediate fail only + 15M structure TP (1-5min expiry) ===
     elif tf15["conf"] >= 60 and tf15["trigger"] in ["BUY","SELL"]:
         has_fail = tf15.get("failed") and tf15.get("fail_dir")
