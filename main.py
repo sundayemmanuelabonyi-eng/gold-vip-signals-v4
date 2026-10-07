@@ -162,14 +162,15 @@ def get_twelvedata_mtf(symbol, interval, fallback):
         return None, [], [], []
 
 def get_real_price_mtf_twelve_first(symbol, interval, fallback):
-    # Try TwelveData first if key exists, else Yahoo - avoids late entry due to Yahoo lag
-    # This fixes your 15M FAILED BEAR 4166.80 issue where price was 4138 but bot thought 4167
+    # FORCE TwelveData now - user said "Use twelve data now" and key is set in Render
     api_key = os.getenv("TWELVEDATA_API_KEY", "")
     if api_key:
         price, hist, highs, lows = get_twelvedata_mtf(symbol, interval, fallback)
         if price is not None and len(hist) >= 20:
             return price, hist, highs, lows
-    # Fallback to Yahoo
+        else:
+            print(f"TwelveData failed for {symbol} {interval}, falling back to Yahoo - check API limit")
+    # Fallback to Yahoo only if TwelveData fails or no key
     return get_real_price_mtf_yahoo(symbol, interval, fallback)
 
 
@@ -1254,13 +1255,14 @@ async def trail_cmd(update, context):
                 if price_data[0] is None:
                     continue
                 cur_price = price_data[0]
-                # override with spot for gold/silver
-                if sym == "GC=F":
-                    sp = get_spot_gold_price()
-                    if sp: cur_price = sp
-                elif sym == "SI=F":
-                    sp = get_spot_silver_price()
-                    if sp: cur_price = sp
+                # TwelveData already gives real spot XAU/USD, don't override with gold-api.com when TwelveData key exists
+                if not os.getenv("TWELVEDATA_API_KEY"):
+                    if sym == "GC=F":
+                        sp = get_spot_gold_price()
+                        if sp: cur_price = sp
+                    elif sym == "SI=F":
+                        sp = get_spot_silver_price()
+                        if sp: cur_price = sp
                 msg = update_trailing_status(sym_name, cur_price)
                 if msg:
                     msgs.append(msg)
