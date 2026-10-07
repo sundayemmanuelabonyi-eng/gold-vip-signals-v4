@@ -553,9 +553,7 @@ def generate_mtf_chart(symbol_name, tf4, tf1, tf15, price, sl, tp1, tp2, directi
 
 
 def update_trailing_status(symbol_name, current_price):
-    # === NO-LOSS + PROFIT-LOCK TRAILING ===
-    # If trade ever moved in profit, it can NEVER close in loss.
-    # It will always close in profit (BE+1 minimum)
+    # === NO-LOSS + PROFIT-LOCK TRAILING WITH SANITY CHECK ===
     if symbol_name not in ACTIVE_TRADES:
         return None
     t = ACTIVE_TRADES[symbol_name]
@@ -564,10 +562,31 @@ def update_trailing_status(symbol_name, current_price):
     direction = t['direction']
     status = t.get('status','OPEN')
     trail_sl = t.get('trail_sl', t['sl'])
+
+    # === SANITY CHECK - FIXES YOUR GER30 SL 135.17 BUG ===
+    # Your screenshot: GER30 entry 25288, current fetched as 135.17 -> profit 25154, SL 135 bug
+    # Reject bad price feeds: if price moved >20% instantly or price < 500 for indices, it's bad data
+    if current_price <= 0:
+        return None
+    # For indices/GOLD, price should be > 1000 for GER30/US30, > 100 for GOLD/SILVER
+    if symbol_name in ["GER30", "US30", "NDX100"] and current_price < 1000:
+        print(f"BAD PRICE FEED {symbol_name} price {current_price} < 1000, entry {entry} - reject trailing (fixes SL 135 bug)")
+        return None
+    if symbol_name in ["GOLD"] and (current_price < 1000 or current_price > 10000):
+        print(f"BAD PRICE FEED GOLD {current_price} out of range - reject")
+        return None
+    if symbol_name in ["SILVER"] and (current_price < 10 or current_price > 100):
+        return None
+    # Reject if profit > 20% of entry (impossible spike = bad data)
+    # For GER30 entry 25288, 20% = 5057, profit 25245 > 5057 = bad feed 135.17
+    profit_abs = abs(entry - current_price)
+    if profit_abs > entry * 0.20:
+        print(f"BAD PRICE SPIKE {symbol_name} entry {entry} current {current_price} profit {profit_abs} >20% - reject (GER30 135 bug)")
+        return None
     
-    trail_dist = atr * 1.0  # tighter trail for profit lock
-    profit_trigger_small = atr * 0.3  # ~6-7$ for GOLD = first profit lock
-    profit_trigger_be = 1.0  # $1 profit = BE+1 lock (NO LOSS guarantee)
+    trail_dist = atr * 1.0
+    profit_trigger_small = atr * 0.3
+    profit_trigger_be = 1.0
     
     msgs = []
     
