@@ -689,17 +689,132 @@ def build_mtf_confluence(symbol_name):
         vip_lines.append(f"Entry: {price:.2f}")
         vip_lines.append(f"SL: {sell_sl:.2f} TP1: {sell_tp1:.2f} TP2: {sell_tp2:.2f} TP3: {sell_tp3:.2f}")
         vip_lines.append(f"⏰ {now}")
+    # === 15M SCALP MODE: when MTF WAIT but 15M alone has strong PA ===
+    # This is what user asked: take short profit even when 4H/1H not aligned
+    elif tf15["conf"] >= 65 and tf15["trigger"] in ["BUY","SELL"] and ("CHoCH" in tf15["desc"] or "BOS" in tf15["desc"] or "FVG" in tf15["fvg"]):
+        # 15M-only scalp with tighter RR 1:1.2, 1:2 for quick profit
+        is_buy_scalp = tf15["trigger"] == "BUY"
+        direction = f"{tf15['trigger']}_SCALP_15M"
+        emoji = "⚡🟢" if is_buy_scalp else "⚡🔴"
+        # Scalp SL/TP: use 15M structure only, tighter
+        atr_15 = tf15["atr"]
+        if is_buy_scalp:
+            scalp_sl = tf15["sup"] - atr_15*0.3 if tf15["sup"] < price else price - atr_15*1.0
+            scalp_tp1 = price + atr_15*1.2
+            scalp_tp2 = price + atr_15*2.0
+            scalp_tp3 = price + atr_15*3.0
+            lines.append(f"⚡ 15M SCALP BUY (15M failed to transit -> short profit)")
+            lines.append(f"{emoji} {symbol_name} SCALP BUY NOW")
+            lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} TP2: {scalp_tp2:.2f} TP3: {scalp_tp3:.2f} ⏰ {now}")
+            lines.append(f"Reason: {tf15['desc']} | {tf15['fvg']} | 15M only - RR 1:1.2 quick")
+            vip_lines.append(f"{emoji} {symbol_name} SCALP BUY - 15M PA only")
+            vip_lines.append("")
+            vip_lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} TP2: {scalp_tp2:.2f}")
+            vip_lines.append(f"⚠️ SCALP MODE: 15M {tf15['desc']} | No 4H/1H confluence | Quick 1:1.2-2.0 RR")
+            vip_lines.append(f"4H {tf4['trend']} | 1H {tf1['bias']} | 15M {tf15['trigger']} - SCALP")
+            # Override for chart/tracking
+            buy_sl = scalp_sl; buy_tp1 = scalp_tp1; buy_tp2 = scalp_tp2; buy_tp3 = scalp_tp3
+            sell_sl = scalp_sl; sell_tp1 = scalp_tp1; sell_tp2 = scalp_tp2; sell_tp3 = scalp_tp3
+        else:
+            scalp_sl = tf15["res"] + atr_15*0.3 if tf15["res"] > price else price + atr_15*1.0
+            scalp_tp1 = price - atr_15*1.2
+            scalp_tp2 = price - atr_15*2.0
+            scalp_tp3 = price - atr_15*3.0
+            lines.append(f"⚡ 15M SCALP SELL (15M failed to transit -> short profit)")
+            lines.append(f"{emoji} {symbol_name} SCALP SELL NOW")
+            lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} TP2: {scalp_tp2:.2f} TP3: {scalp_tp3:.2f} ⏰ {now}")
+            lines.append(f"Reason: {tf15['desc']} | {tf15['fvg']} | 15M only - RR 1:1.2 quick")
+            vip_lines.append(f"{emoji} {symbol_name} SCALP SELL - 15M PA only")
+            vip_lines.append("")
+            vip_lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} TP2: {scalp_tp2:.2f}")
+            vip_lines.append(f"⚠️ SCALP MODE: 15M {tf15['desc']} | No 4H/1H confluence | Quick 1:1.2-2.0 RR")
+            vip_lines.append(f"4H {tf4['trend']} | 1H {tf1['bias']} | 15M {tf15['trigger']} - SCALP")
+            buy_sl = scalp_sl; buy_tp1 = scalp_tp1; buy_tp2 = scalp_tp2; buy_tp3 = scalp_tp3
+            sell_sl = scalp_sl; sell_tp1 = scalp_tp1; sell_tp2 = scalp_tp2; sell_tp3 = scalp_tp3
+    # === 1H FAILED TRANSIT SCALP ===
+    elif tf1["conf"] >= 60 and tf1["bias"] in ["BULL","BEAR"] and ("CHoCH" in tf1["desc"] or "BOS" in tf1["desc"] or "Sweep" in tf1["sweep"]):
+        is_buy = tf1["bias"] == "BULL"
+        direction = f"{tf1['bias']}_SCALP_1H"
+        emoji = "⚡⚡🟢" if is_buy else "⚡⚡🔴"
+        atr_1 = tf1["atr"]
+        if is_buy:
+            scalp_sl = tf1["sup"] - atr_1*0.3 if tf1["sup"] < price else price - atr_1*1.0
+            scalp_tp1 = price + atr_1*1.0
+            scalp_tp2 = price + atr_1*1.8
+            scalp_tp3 = price + atr_1*2.5
+            lines.append(f"⚡⚡ 1H SCALP BUY (1H failed to transit -> short profit)")
+            lines.append(f"{emoji} {symbol_name} 1H SCALP BUY NOW")
+            lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} TP2: {scalp_tp2:.2f} TP3: {scalp_tp3:.2f} ⏰ {now}")
+            lines.append(f"Reason: {tf1['desc']} | {tf1['sweep']} | 1H only")
+            vip_lines.append(f"{emoji} {symbol_name} 1H SCALP BUY")
+            vip_lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} TP2: {scalp_tp2:.2f}")
+            vip_lines.append(f"⚠️ 1H SCALP: {tf1['desc']} | Sweep:{tf1['sweep']} | 1H RR 1:1 quick")
+        else:
+            scalp_sl = tf1["res"] + atr_1*0.3 if tf1["res"] > price else price + atr_1*1.0
+            scalp_tp1 = price - atr_1*1.0
+            scalp_tp2 = price - atr_1*1.8
+            scalp_tp3 = price - atr_1*2.5
+            lines.append(f"⚡⚡ 1H SCALP SELL (1H failed to transit -> short profit)")
+            lines.append(f"{emoji} {symbol_name} 1H SCALP SELL NOW")
+            lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} TP2: {scalp_tp2:.2f} TP3: {scalp_tp3:.2f} ⏰ {now}")
+            lines.append(f"Reason: {tf1['desc']} | {tf1['sweep']} | 1H only")
+            vip_lines.append(f"{emoji} {symbol_name} 1H SCALP SELL")
+            vip_lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} TP2: {scalp_tp2:.2f}")
+            vip_lines.append(f"⚠️ 1H SCALP: {tf1['desc']} | Sweep:{tf1['sweep']} | 1H RR 1:1 quick")
+        buy_sl = scalp_sl; buy_tp1 = scalp_tp1; buy_tp2 = scalp_tp2; buy_tp3 = scalp_tp3
+        sell_sl = scalp_sl; sell_tp1 = scalp_tp1; sell_tp2 = scalp_tp2; sell_tp3 = scalp_tp3
+    # === 4H FAILED TRANSIT SCALP ===
+    elif tf4["conf"] >= 60 and tf4["trend"] in ["BULL","BEAR"] and ("CHoCH" in tf4["desc"] or "BOS" in tf4["desc"]):
+        is_buy = tf4["trend"] == "BULL"
+        direction = f"{tf4['trend']}_SCALP_4H"
+        emoji = "⚡⚡⚡🟢" if is_buy else "⚡⚡⚡🔴"
+        atr_4 = tf4["atr"]
+        if is_buy:
+            scalp_sl = tf4["sup"] - atr_4*0.4 if tf4["sup"] < price else price - atr_4*1.2
+            scalp_tp1 = price + atr_4*1.0
+            scalp_tp2 = price + atr_4*2.0
+            scalp_tp3 = price + atr_4*3.0
+            lines.append(f"⚡⚡⚡ 4H SCALP BUY (4H failed to transit -> short profit)")
+            lines.append(f"{emoji} {symbol_name} 4H SCALP BUY NOW")
+            lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} TP2: {scalp_tp2:.2f} TP3: {scalp_tp3:.2f} ⏰ {now}")
+            lines.append(f"Reason: {tf4['desc']} | OB {tf4['ob_low']:.0f}/{tf4['ob_high']:.0f} | 4H only")
+            vip_lines.append(f"{emoji} {symbol_name} 4H SCALP BUY")
+            vip_lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} TP2: {scalp_tp2:.2f}")
+        else:
+            scalp_sl = tf4["res"] + atr_4*0.4 if tf4["res"] > price else price + atr_4*1.2
+            scalp_tp1 = price - atr_4*1.0
+            scalp_tp2 = price - atr_4*2.0
+            scalp_tp3 = price - atr_4*3.0
+            lines.append(f"⚡⚡⚡ 4H SCALP SELL (4H failed to transit -> short profit)")
+            lines.append(f"{emoji} {symbol_name} 4H SCALP SELL NOW")
+            lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} TP2: {scalp_tp2:.2f} TP3: {scalp_tp3:.2f} ⏰ {now}")
+            lines.append(f"Reason: {tf4['desc']} | OB {tf4['ob_low']:.0f}/{tf4['ob_high']:.0f} | 4H only")
+            vip_lines.append(f"{emoji} {symbol_name} 4H SCALP SELL")
+            vip_lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {scalp_tp1:.2f} TP2: {scalp_tp2:.2f}")
+        buy_sl = scalp_sl; buy_tp1 = scalp_tp1; buy_tp2 = scalp_tp2; buy_tp3 = scalp_tp3
+        sell_sl = scalp_sl; sell_tp1 = scalp_tp1; sell_tp2 = scalp_tp2; sell_tp3 = scalp_tp3
     else:
         lines.append(f"❌ WAIT No MTF confluence")
         lines.append(f"4H {tf4['trend']} | 1H {tf1['bias']} | 15M {tf15['trigger']}")
-    # Generate chart only when we have a valid trade
+        # Even in WAIT, show 15M scalp potential if exists but low conf
+        if tf15["trigger"] in ["BUY","SELL"]:
+            lines.append(f"👀 15M PA showing {tf15['trigger']} ({tf15['desc']}) but conf {tf15['conf']}% <65 or no FVG - waiting for CHoCH/BOS")
+        if tf1["bias"] in ["BULL","BEAR"]:
+            lines.append(f"👀 1H {tf1['bias']} {tf1['desc']} | {tf1['sweep']} - watch for 1H failed transit scalp")
+        if tf4["trend"] in ["BULL","BEAR"]:
+            lines.append(f"👀 4H {tf4['trend']} {tf4['desc']} - watch for 4H failed transit scalp")
+    # Generate chart only when we have a valid trade (including SCALP)
     chart_path = None
-    if direction in ["BUY","SELL"]:
+    if "BUY" in direction or "SELL" in direction:
         try:
-            sl = buy_sl if direction=="BUY" else sell_sl
-            tp1 = buy_tp1 if direction=="BUY" else sell_tp1
-            tp2 = buy_tp2 if direction=="BUY" else sell_tp2
-            tp3 = buy_tp3 if direction=="BUY" else sell_tp3
+            if "SCALP" in direction:
+                is_buy = "BUY" in direction
+            else:
+                is_buy = direction=="BUY"
+            sl = buy_sl if is_buy else sell_sl
+            tp1 = buy_tp1 if is_buy else sell_tp1
+            tp2 = buy_tp2 if is_buy else sell_tp2
+            tp3 = buy_tp3 if is_buy else sell_tp3
             chart_path = generate_mtf_chart(symbol_name, tf4, tf1, tf15, price, sl, tp1, tp2, direction)
             # SAVE ACTIVE TRADE FOR TRAILING
             ACTIVE_TRADES[symbol_name] = {
@@ -745,7 +860,7 @@ def build_4h_fallback(name):
     try:
         sym, fb = SYMBOLS[name]
         tf4 = analyze_4h(sym, fb)
-        return f"📊 {name} 4H {tf4['trend']} | Price {tf4['price']:.2f} EMA50 {tf4['e50']:.2f} RSI {tf4['rsi']:.1f}"
+        return f"📊 {name} 4H {tf4['trend']} {tf4['conf']}% {tf4['desc']} | Price {tf4['price']:.2f} OB {tf4['ob_low']:.0f}/{tf4['ob_high']:.0f}"
     except Exception as e2:
         return f"❌ Fallback failed: {e2}"
 
