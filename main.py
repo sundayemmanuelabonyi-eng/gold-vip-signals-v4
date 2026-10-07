@@ -297,8 +297,20 @@ def get_real_price_mtf_yahoo(symbol, interval, fallback):
 
 
 def get_real_price_mtf(symbol, interval, fallback):
-    # Wrapper: TwelveData first (real-time), Yahoo second
-    return get_real_price_mtf_twelve_first(symbol, interval, fallback)
+    # FIXED: For GOLD/SILVER use TwelveData first (accurate XAU/USD)
+    # For indices (GER30/US30/NDX) use Yahoo first - closer to MT5 broker cash price
+    # TwelveData DAX is Xetra exchange, not broker CFD -> 48 points disparity (25148 vs 25100)
+    if symbol in ["GC=F", "SI=F"]:
+        # GOLD/SILVER - TwelveData XAU/USD is best
+        return get_real_price_mtf_twelve_first(symbol, interval, fallback)
+    else:
+        # INDICES - Yahoo ^GDAXI/^DJI/^NDX is closer to MT5 broker
+        # Try Yahoo first, TwelveData as fallback
+        price, hist, highs, lows = get_real_price_mtf_yahoo(symbol, interval, fallback)
+        if price is not None and len(hist) >= 20:
+            return price, hist, highs, lows
+        # Fallback to TwelveData if Yahoo fails
+        return get_real_price_mtf_twelve_first(symbol, interval, fallback)
 
 
 def get_sr_levels(history, lookback=30, highs=None, lows=None, price=None, sh=None, sl=None):
@@ -665,10 +677,10 @@ def update_trailing_status(symbol_name, current_price):
     return "\n".join(msgs) if msgs else None
 
 SYMBOLS = {
-    "GOLD": ("GC=F", 4140.52),
+    "GOLD": ("GC=F", 4136.84),
     "SILVER": ("SI=F", 32.5),
     "US30": ("^DJI", 46000),
-    "GER30": ("^GDAXI", 19450),
+    "GER30": ("^GDAXI", 25148.03),  # Updated from screenshot 25148, not 19450 old
     "NDX100": ("^NDX", 30800),
 }
 
