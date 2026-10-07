@@ -171,37 +171,66 @@ def get_real_price_mtf(symbol, interval, fallback):
     print(f"CRITICAL: No data for {key}")
     return None, [], [], []
 
-def get_sr_levels(history, lookback=30):
-    # PROPER SWING SR - finds recent swing highs/lows, not just min/max
-    if len(history) < 10:
-        return history[-1], history[-1]
-    recent = history[-lookback:] if len(history)>=lookback else history
-    # Find swing lows and highs using fractal logic
-    swing_lows = []
-    swing_highs = []
-    for i in range(2, len(recent)-2):
-        # Swing low: lower than 2 before and 2 after
-        if recent[i] < recent[i-1] and recent[i] < recent[i-2] and recent[i] < recent[i+1] and recent[i] < recent[i+2]:
-            swing_lows.append(recent[i])
-        # Swing high
-        if recent[i] > recent[i-1] and recent[i] > recent[i-2] and recent[i] > recent[i+1] and recent[i] > recent[i+2]:
-            swing_highs.append(recent[i])
-    # If no swings found, fallback to min/max but filtered
-    if not swing_lows:
-        # Use lowest 3 values average to avoid wick spike
-        sorted_recent = sorted(recent)
-        swing_lows = sorted_recent[:3]
-    if not swing_highs:
-        sorted_recent = sorted(recent)
-        swing_highs = sorted_recent[-3:]
-    # Support = average of last 2 swing lows, Resistance = average of last 2 swing highs
-    sup = sum(swing_lows[-2:]) / min(2, len(swing_lows[-2:])) if swing_lows else min(recent)
-    res = sum(swing_highs[-2:]) / min(2, len(swing_highs[-2:])) if swing_highs else max(recent)
-    # Safety: ensure res > sup
-    if res <= sup:
-        res = max(recent)
-        sup = min(recent)
-    return sup, res
+def get_sr_levels(history, lookback=30, highs=None, lows=None, price=None, sh=None, sl=None):
+    # IMPROVED: uses actual swing points sh/sl and ensures sup < price < res for 15M structure
+    if sh is None or sl is None:
+        # fallback old logic but with price filter
+        if len(history) < 10:
+            return history[-1]*0.998, history[-1]*1.002
+        recent = history[-lookback:] if len(history)>=lookback else history
+        swing_lows = []
+        swing_highs = []
+        for i in range(2, len(recent)-2):
+            if recent[i] < recent[i-1] and recent[i] < recent[i-2] and recent[i] < recent[i+1] and recent[i] < recent[i+2]:
+                swing_lows.append(recent[i])
+            if recent[i] > recent[i-1] and recent[i] > recent[i-2] and recent[i] > recent[i+1] and recent[i] > recent[i+2]:
+                swing_highs.append(recent[i])
+        if not swing_lows:
+            swing_lows = sorted(recent)[:3]
+        if not swing_highs:
+            swing_highs = sorted(recent)[-3:]
+        sup = sum(swing_lows[-2:]) / min(2, len(swing_lows[-2:])) if swing_lows else min(recent)
+        res = sum(swing_highs[-2:]) / min(2, len(swing_highs[-2:])) if swing_highs else max(recent)
+        if res <= sup:
+            res = max(recent)
+            sup = min(recent)
+        # Ensure sup < price < res if price given
+        if price is not None:
+            # find sup below price
+            lows_below = [x for x in swing_lows if x < price]
+            highs_above = [x for x in swing_highs if x > price]
+            if lows_below:
+                sup = max(lows_below)  # nearest support below
+            else:
+                sup = price * 0.998
+            if highs_above:
+                res = min(highs_above)  # nearest resistance above
+            else:
+                res = price * 1.002
+        return sup, res
+    else:
+        # Use actual sh/sl swing points for true structure
+        if price is None:
+            price = history[-1] if history else 0
+        # Support = nearest swing low below price
+        sl_below = [v for i,v in sl if v < price]
+        sh_above = [v for i,v in sh if v > price]
+        if sl_below:
+            sup = max(sl_below)
+        else:
+            # fallback to lowest low in recent
+            sup = min(lows[-20:]) if lows and len(lows)>=20 else price*0.995
+        if sh_above:
+            res = min(sh_above)
+        else:
+            res = max(highs[-20:]) if highs and len(highs)>=20 else price*1.005
+        # If still invalid (both above/below), use ATR buffer
+        if sup >= price:
+            sup = price * 0.997
+        if res <= price:
+            res = price * 1.003
+        return sup, res
+
 
 
 def get_swing_points(highs, lows, left=2, right=2):
@@ -284,7 +313,7 @@ def analyze_4h(symbol, fallback):
     price, hist, highs, lows = result
     if spot_override: price = spot_override
     trend, conf, sh, sl, desc, failed, fail_dir = detect_bos_choch(hist, highs, lows)
-    sup, res = get_sr_levels(hist, 30)
+    sup, res = get_sr_levels(hist, 30, highs, lows, price, sh, sl)
     atr_val = atr(highs, lows, hist, 14)
     ob_high = res; ob_low = sup
     if sh: ob_high = sh[-1][1]
@@ -300,7 +329,7 @@ def analyze_1h(symbol, fallback):
     price, hist, highs, lows = result
     if spot_override: price = spot_override
     trend, conf, sh, sl, desc, failed, fail_dir = detect_bos_choch(hist, highs, lows)
-    sup, res = get_sr_levels(hist, 50)
+    sup, res = get_sr_levels(hist, 50, highs, lows, price, sh, sl)
     atr_val = atr(highs, lows, hist, 14)
     sweep = "None"
     if len(highs) >= 20:
@@ -323,7 +352,7 @@ def analyze_15m(symbol, fallback):
     price, hist, highs, lows = result
     if spot_override: price = spot_override
     trend, conf, sh, sl, desc, failed, fail_dir = detect_bos_choch(hist, highs, lows)
-    sup, res = get_sr_levels(hist, 20)
+    sup, res = get_sr_levels(hist, 20, highs, lows, price, sh, sl)
     atr_val = atr(highs, lows, hist, 14)
     trigger = "WAIT"
     if "CHoCH BULL" in desc:
@@ -613,13 +642,14 @@ def build_mtf_confluence(symbol_name):
         sup_15 = tf15["sup"]; res_15 = tf15["res"]
         # SL: beyond failed wick + buffer
         if is_buy:
-            # Failed BEAR -> BUY, SL below 15M sup (respect 15M structure)
-            scalp_sl = min(tf15["sup"], sup_tf) - atr_tf*0.3 if min(tf15["sup"], sup_tf) < price else price - atr_tf*0.8
+            # Failed BEAR -> BUY, SL below 15M sup (respect 15M structure - FIXED tight SL)
+            scalp_sl = tf15["sup"] - atr_tf*0.3  # 15M structure SL, not 4H
+            if scalp_sl >= price:
+                scalp_sl = price - atr_tf*0.8
             # TP1,2,3 respect 15M structure: next swing highs / OB / FVG
-            # TP1 = 15M res (immediate structure), TP2 = 1H res, TP3 = 4H res
-            tp1 = res_15 if res_15 > price + atr_tf*0.5 else price + atr_tf*1.0
-            tp2 = tf1["res"] if tf1["res"] > tp1 else price + atr_tf*1.8
-            tp3 = tf4["res"] if tf4["res"] > tp2 else price + atr_tf*2.5
+            tp1 = res_15 if res_15 > price + atr_tf*0.3 else price + atr_tf*0.8
+            tp2 = tf1["res"] if tf1["res"] > tp1 else price + atr_tf*1.5
+            tp3 = tf4["res"] if tf4["res"] > tp2 else price + atr_tf*2.2
             lines.append(f"🚨 {tf_name} IMMEDIATE FAILED {desc}")
             lines.append(f"{emoji} {symbol_name} IMMEDIATE {fail_dir} NOW - Failed to transit")
             lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {tp1:.2f} (15M {res_15:.2f}) TP2: {tp2:.2f} (1H) TP3: {tp3:.2f} (4H) ⏰ {now}")
@@ -629,10 +659,13 @@ def build_mtf_confluence(symbol_name):
             vip_lines.append(f"🚨 {desc}")
             vip_lines.append(f"15M Structure respected: TP1=15M {res_15:.2f}")
         else:
-            scalp_sl = max(tf15["res"], res_tf) + atr_tf*0.3 if max(tf15["res"], res_tf) > price else price + atr_tf*0.8
-            tp1 = sup_15 if sup_15 < price - atr_tf*0.5 else price - atr_tf*1.0
-            tp2 = tf1["sup"] if tf1["sup"] < tp1 else price - atr_tf*1.8
-            tp3 = tf4["sup"] if tf4["sup"] < tp2 else price - atr_tf*2.5
+            # FIXED: SL respects 15M structure only, tight (not 4H 4198)
+            scalp_sl = tf15["res"] + atr_tf*0.3  # 15M res + buffer
+            if scalp_sl <= price:
+                scalp_sl = price + atr_tf*0.8
+            tp1 = sup_15 if sup_15 < price - atr_tf*0.3 else price - atr_tf*0.8
+            tp2 = tf1["sup"] if tf1["sup"] < tp1 else price - atr_tf*1.5
+            tp3 = tf4["sup"] if tf4["sup"] < tp2 else price - atr_tf*2.2
             lines.append(f"🚨 {tf_name} IMMEDIATE FAILED {desc}")
             lines.append(f"{emoji} {symbol_name} IMMEDIATE {fail_dir} NOW - Failed to transit")
             lines.append(f"Entry: {price:.2f} SL: {scalp_sl:.2f} TP1: {tp1:.2f} (15M {sup_15:.2f}) TP2: {tp2:.2f} (1H) TP3: {tp3:.2f} (4H) ⏰ {now}")
