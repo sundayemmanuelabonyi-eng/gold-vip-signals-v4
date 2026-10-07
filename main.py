@@ -106,11 +106,64 @@ def atr(highs, lows, closes, period=14):
     return sum(trs[-period:])/period if trs else 5.0
 
 
+
+def get_twelvedata_api_key():
+    # Robust: check env vars, secret files, .env, any TWE* var (your screenshot shows TWE...)
+    # 1. Direct env vars (multiple possible names)
+    for name in ["TWELVEDATA_API_KEY", "TWELVE_DATA_API_KEY", "TWELVEDATA_KEY", "TWELVE_API_KEY", "TWE_API_KEY"]:
+        v = os.getenv(name, "").strip()
+        if v and len(v) > 10:
+            return v
+    # 2. Any env var starting with TWE (your screenshot shows TWE... key)
+    for k,v in os.environ.items():
+        if k.startswith("TWE") and len(v.strip()) > 10:
+            # avoid BOT_TOKEN etc
+            if "TOKEN" not in k or "TWELVE" in k or k.startswith("TWE"):
+                vv = v.strip()
+                # TwelveData keys are like 123abc... 32 chars
+                if len(vv) >= 20:
+                    print(f"Found TwelveData key in env var {k}")
+                    return vv
+    # 3. Secret files (Render Secret Files are in /etc/secrets/)
+    secret_paths = [
+        "/etc/secrets/TWELVEDATA_API_KEY",
+        "/etc/secrets/TWELVE_DATA_API_KEY",
+        "/etc/secrets/TWELVEDATA",
+        "/etc/secrets/twelvedata",
+        "/etc/secrets/TWE",
+        "./TWELVEDATA_API_KEY",
+        "/mnt/data/TWELVEDATA_API_KEY"
+    ]
+    for p in secret_paths:
+        try:
+            if os.path.exists(p):
+                with open(p, 'r') as sf:
+                    v = sf.read().strip()
+                    if len(v) > 10:
+                        print(f"Found TwelveData key in file {p}")
+                        return v
+        except:
+            pass
+    # 4. Try reading .env file if exists
+    try:
+        if os.path.exists(".env"):
+            with open(".env", "r") as ef:
+                for line in ef:
+                    if "TWELVE" in line and "=" in line:
+                        parts = line.strip().split("=",1)
+                        if len(parts)==2:
+                            v = parts[1].strip().strip('"').strip("'")
+                            if len(v) > 10:
+                                return v
+    except:
+        pass
+    return ""
+
+
+
 def get_twelvedata_mtf(symbol, interval, fallback):
     # TwelveData API - more accurate real-time, fixes Yahoo lag issue
-    # Env: TWELVEDATA_API_KEY
-    # symbol mapping: GC=F -> XAU/USD, SI=F -> XAG/USD
-    api_key = os.getenv("TWELVEDATA_API_KEY", "")
+    api_key = get_twelvedata_api_key()
     if not api_key:
         return None, [], [], []  # no key, fallback to Yahoo
     try:
@@ -162,8 +215,7 @@ def get_twelvedata_mtf(symbol, interval, fallback):
         return None, [], [], []
 
 def get_real_price_mtf_twelve_first(symbol, interval, fallback):
-    # FORCE TwelveData now - user said "Use twelve data now" and key is set in Render
-    api_key = os.getenv("TWELVEDATA_API_KEY", "")
+    api_key = get_twelvedata_api_key()
     if api_key:
         price, hist, highs, lows = get_twelvedata_mtf(symbol, interval, fallback)
         if price is not None and len(hist) >= 20:
@@ -423,7 +475,7 @@ def analyze_1h(symbol, fallback):
 
 def analyze_15m(symbol, fallback):
     spot_override = None
-    if not os.getenv("TWELVEDATA_API_KEY"):
+    if not get_twelvedata_api_key():
         if symbol == "GC=F": spot_override = get_spot_gold_price()
         elif symbol == "SI=F": spot_override = get_spot_silver_price()
     result = get_real_price_mtf(symbol, "15m", fallback)
@@ -611,7 +663,8 @@ def build_mtf_confluence(symbol_name):
     price = tf15["price"]
     now = datetime.now().strftime('%H:%M')
     # Data source indicator
-    data_source = "TwelveData XAU/USD" if os.getenv("TWELVEDATA_API_KEY") else "Yahoo GC=F + gold-api.com spot"
+    td_key = get_twelvedata_api_key()
+    data_source = f"TwelveData XAU/USD key:{td_key[:6]}...{td_key[-4:]}" if td_key else "Yahoo GC=F + gold-api.com spot (NO TwelveData key found!)"
     lines = []
     lines.append(f"🎯 {symbol_name} 4H->1H->15M PURE PRICE ACTION | Source: {data_source}")
     lines.append(f"💰 {price:.2f} | 4H {tf4['trend']} {tf4['conf']}% {tf4['desc']} | 1H {tf1['bias']} {tf1['sweep']} | 15M {tf15['trigger']} {tf15['desc']} FVG:{tf15['fvg']}")
@@ -1256,7 +1309,7 @@ async def trail_cmd(update, context):
                     continue
                 cur_price = price_data[0]
                 # TwelveData already gives real spot XAU/USD, don't override with gold-api.com when TwelveData key exists
-                if not os.getenv("TWELVEDATA_API_KEY"):
+                if not get_twelvedata_api_key():
                     if sym == "GC=F":
                         sp = get_spot_gold_price()
                         if sp: cur_price = sp
