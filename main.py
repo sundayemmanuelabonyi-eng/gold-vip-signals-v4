@@ -448,13 +448,23 @@ def detect_failed_transit_immediate(hist, highs, lows, sh, sl):
 
 def analyze_4h(symbol, fallback):
     spot_override = None
-    if not get_twelvedata_api_key():
-        if symbol == "GC=F": spot_override = get_spot_gold_price()
-        elif symbol == "SI=F": spot_override = get_spot_silver_price()
+    # FIXED: Always use real-time spot for GOLD/SILVER to match MT5, not delayed candle close
+    # Your issue: bot entry 4120 vs MT5 4073 = 47$ gap because 15M close delayed
+    # Solution: use gold-api.com spot (real-time) for price, TwelveData/Yahoo only for history/structure
+    if symbol == "GC=F":
+        spot_override = get_spot_gold_price()
+        if not spot_override:
+            # fallback to TwelveData spot if gold-api fails
+            spot_override = None
+    elif symbol == "SI=F":
+        spot_override = get_spot_silver_price()
     result = get_real_price_mtf(symbol, "4h", fallback)
     if result[0] is None: return None
     price, hist, highs, lows = result
-    if spot_override: price = spot_override
+    if spot_override: 
+        # Use spot for current price, keep history for structure
+        print(f"Using spot override for {symbol} 4H: {price:.2f} -> {spot_override:.2f} (MT5 match)")
+        price = spot_override
     trend, conf, sh, sl, desc, failed, fail_dir = detect_bos_choch(hist, highs, lows)
     sup, res = get_sr_levels(hist, 30, highs, lows, price, sh, sl)
     atr_val = atr(highs, lows, hist, 14)
@@ -465,13 +475,15 @@ def analyze_4h(symbol, fallback):
 
 def analyze_1h(symbol, fallback):
     spot_override = None
-    if not get_twelvedata_api_key():
-        if symbol == "GC=F": spot_override = get_spot_gold_price()
-        elif symbol == "SI=F": spot_override = get_spot_silver_price()
+    if symbol == "GC=F":
+        spot_override = get_spot_gold_price()
+    elif symbol == "SI=F":
+        spot_override = get_spot_silver_price()
     result = get_real_price_mtf(symbol, "1h", fallback)
     if result[0] is None: return None
     price, hist, highs, lows = result
-    if spot_override: price = spot_override
+    if spot_override: 
+        price = spot_override
     trend, conf, sh, sl, desc, failed, fail_dir = detect_bos_choch(hist, highs, lows)
     sup, res = get_sr_levels(hist, 50, highs, lows, price, sh, sl)
     atr_val = atr(highs, lows, hist, 14)
@@ -489,13 +501,17 @@ def analyze_1h(symbol, fallback):
 
 def analyze_15m(symbol, fallback):
     spot_override = None
-    if not get_twelvedata_api_key():
-        if symbol == "GC=F": spot_override = get_spot_gold_price()
-        elif symbol == "SI=F": spot_override = get_spot_silver_price()
+    # CRITICAL FIX: Always use spot for entry price to match MT5
+    # History from TwelveData for structure, but price from spot
+    if symbol == "GC=F":
+        spot_override = get_spot_gold_price()
+    elif symbol == "SI=F":
+        spot_override = get_spot_silver_price()
     result = get_real_price_mtf(symbol, "15m", fallback)
     if result[0] is None: return None
     price, hist, highs, lows = result
-    if spot_override: price = spot_override
+    if spot_override: 
+        price = spot_override
     trend, conf, sh, sl, desc, failed, fail_dir = detect_bos_choch(hist, highs, lows)
     sup, res = get_sr_levels(hist, 20, highs, lows, price, sh, sl)
     atr_val = atr(highs, lows, hist, 14)
@@ -693,7 +709,17 @@ def build_mtf_confluence(symbol_name):
     if tf4 is None or tf1 is None or tf15 is None:
         msg = f"⏳ {symbol_name} Data unavailable"
         return msg, "", "WAIT", fallback, None
+    # Use real-time spot for entry to match MT5 - fixes 4120 vs 4073 disparity
     price = tf15["price"]
+    # Override with spot for GOLD/SILVER to match MT5 real-time
+    if sym == "GC=F":
+        sp = get_spot_gold_price()
+        if sp and 1000 < sp < 10000:
+            price = sp
+    elif sym == "SI=F":
+        sp = get_spot_silver_price()
+        if sp and 10 < sp < 100:
+            price = sp
     now = datetime.now().strftime('%H:%M')
     td_key = get_twelvedata_api_key()
     data_source = f"TwelveData XAU/USD key:{td_key[:6]}...{td_key[-4:]}" if td_key else "Yahoo GC=F"
