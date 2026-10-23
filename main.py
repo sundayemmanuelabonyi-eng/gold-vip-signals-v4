@@ -8,7 +8,16 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TD_KEY = os.getenv("TWELVEDATA_API_KEY")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "-1004402762942"))
+RAW_CHANNEL = os.getenv("CHANNEL_ID", "-1004402762942").strip()
+# Accept both @username and -100... ID (your screenshot shows @GoldVIPSignalsOnyebest)
+try:
+    if RAW_CHANNEL.startswith("@") or RAW_CHANNEL.startswith("t.me/"):
+        CHANNEL_ID = RAW_CHANNEL if RAW_CHANNEL.startswith("@") else "@" + RAW_CHANNEL.split("/")[-1]
+    else:
+        CHANNEL_ID = int(RAW_CHANNEL)
+except:
+    CHANNEL_ID = RAW_CHANNEL  # fallback keep as string
+print(f"Channel resolved: {CHANNEL_ID}")
 
 logging.basicConfig(level=logging.INFO)
 SYMBOLS = {
