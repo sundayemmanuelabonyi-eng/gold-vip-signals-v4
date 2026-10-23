@@ -286,7 +286,7 @@ def build_pure_pa_signal(symbol_key):
     tf1=analyze_tf_pure_pa(td_symbol,"1h")
     tf15=analyze_tf_pure_pa(td_symbol,"15m")
     if not tf4 or not tf1 or not tf15:
-        return "❌ TwelveData not ready - check TWELVEDATA_API_KEY env. Single feed only.", None, "WAIT", 0
+        return "❌ TwelveData not ready - check TWELVEDATA_API_KEY env. Single feed only.", None, "WAIT", 0, 0, 0, 0, 0
 
     price=tf15["price"]
     atr_v=tf15["atr"]
@@ -389,7 +389,7 @@ def build_pure_pa_signal(symbol_key):
             f"15M: {tf15['trend']} {tf15['desc']}\n"
             f"Price: {price:.2f} ATR: {atr_v:.2f}\nFVG: {tf15['fvg']} Sweep: {tf15['sweep']}\n\n"
             f"Need: TRUE FAILED 0.25 ATR OR THREE ALIGN OR Pullback 0.6 ATR to Protected + 15M BOS\n"
-            f"Source: TwelveData {td_symbol} ONLY"), None, "WAIT", 0
+            f"Source: TwelveData {td_symbol} ONLY"), None, "WAIT", price, 0, 0, 0, 0
 
 # ===== TELEGRAM COMMANDS =====
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
